@@ -182,9 +182,10 @@ impl HookSharedState {
 
 /// バックグラウンドで動作するグローバルキー監視スレッドの制御ハンドル。
 pub struct KeyHookHandle {
-    backend: KeyHookBackend,
+    backend: Arc<Mutex<KeyHookBackend>>,
     shared: Arc<Mutex<HookSharedState>>,
     stop_flag: Arc<AtomicBool>,
+    reload_flag: Arc<AtomicBool>,
     worker: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -193,39 +194,68 @@ impl KeyHookHandle {
     pub fn spawn(initial_config: TriggerConfig, on_trigger: impl Fn() + Send + 'static) -> Self {
         let shared = Arc::new(Mutex::new(HookSharedState::new(&initial_config)));
         let stop_flag = Arc::new(AtomicBool::new(false));
+        let reload_flag = Arc::new(AtomicBool::new(false));
+        let backend_state = Arc::new(Mutex::new(KeyHookBackend::X11Fallback));
 
-        let (backend_tx, backend_rx) = mpsc::sync_channel(1);
+        let (init_tx, init_rx) = mpsc::sync_channel(1);
         let worker_shared = Arc::clone(&shared);
         let worker_stop = Arc::clone(&stop_flag);
+        let worker_reload = Arc::clone(&reload_flag);
+        let worker_backend = Arc::clone(&backend_state);
 
         let handle = thread::spawn(move || {
-            let devices = collect_keyboard_devices();
-            let backend = if devices.is_empty() {
-                KeyHookBackend::X11Fallback
-            } else {
-                KeyHookBackend::Evdev {
-                    device_count: devices.len(),
-                }
-            };
-            let _ = backend_tx.send(backend);
-
             let started_at = Instant::now();
-            match backend {
-                KeyHookBackend::Evdev { .. } => {
-                    run_evdev_loop(devices, &worker_shared, &worker_stop, started_at, &on_trigger);
+            let mut init_tx = Some(init_tx);
+
+            while !worker_stop.load(Ordering::Acquire) {
+                worker_reload.store(false, Ordering::Release);
+                let devices = collect_keyboard_devices();
+                let next_backend = if devices.is_empty() {
+                    KeyHookBackend::X11Fallback
+                } else {
+                    KeyHookBackend::Evdev {
+                        device_count: devices.len(),
+                    }
+                };
+
+                if let Ok(mut guard) = worker_backend.lock() {
+                    *guard = next_backend;
                 }
-                KeyHookBackend::X11Fallback => {
-                    run_x11_fallback_loop(&worker_shared, &worker_stop, started_at, &on_trigger);
+                if let Some(tx) = init_tx.take() {
+                    let _ = tx.send(next_backend);
+                }
+
+                match next_backend {
+                    KeyHookBackend::Evdev { .. } => {
+                        run_evdev_loop(
+                            devices,
+                            &worker_shared,
+                            &worker_stop,
+                            &worker_reload,
+                            started_at,
+                            &on_trigger,
+                        );
+                    }
+                    KeyHookBackend::X11Fallback => {
+                        run_x11_fallback_loop(
+                            &worker_shared,
+                            &worker_stop,
+                            &worker_reload,
+                            started_at,
+                            &on_trigger,
+                        );
+                    }
                 }
             }
         });
 
-        let backend = backend_rx.recv().unwrap_or(KeyHookBackend::X11Fallback);
+        let _ = init_rx.recv();
 
         Self {
-            backend,
+            backend: backend_state,
             shared,
             stop_flag,
+            reload_flag,
             worker: Mutex::new(Some(handle)),
         }
     }
@@ -239,9 +269,17 @@ impl KeyHookHandle {
         }
     }
 
+    /// 入力デバイスの再走査を要求し、権限付与直後の evdev 昇格を即時反映する。
+    pub fn reload_devices(&self) {
+        self.reload_flag.store(true, Ordering::Release);
+    }
+
     /// 現在使用中のキー監視バックエンド状態を返す。
     pub fn backend_status(&self) -> KeyHookBackend {
         self.backend
+            .lock()
+            .map(|guard| *guard)
+            .unwrap_or(KeyHookBackend::X11Fallback)
     }
 
     /// 設定画面のキー録音モードを開始し、次に押下されたキーを 1 回だけ送信する。
@@ -344,10 +382,11 @@ fn run_evdev_loop(
     mut devices: Vec<Device>,
     shared: &Arc<Mutex<HookSharedState>>,
     stop_flag: &AtomicBool,
+    reload_flag: &AtomicBool,
     started_at: Instant,
     on_trigger: &(dyn Fn() + Send),
 ) {
-    while !stop_flag.load(Ordering::Acquire) {
+    while !stop_flag.load(Ordering::Acquire) && !reload_flag.load(Ordering::Acquire) {
         let mut had_events = false;
         let mut disconnected = Vec::new();
 
@@ -381,6 +420,11 @@ fn run_evdev_loop(
             devices.remove(idx);
         }
 
+        // 全キーボードが切断された場合は外付けキーボード再接続等のためデバイス再収集へ戻る。
+        if devices.is_empty() {
+            break;
+        }
+
         if !had_events {
             thread::sleep(Duration::from_millis(EVDEV_IDLE_SLEEP_MS));
         }
@@ -406,15 +450,22 @@ fn diff_x11_keymap(prev: &[u8; 32], curr: &[u8; 32]) -> Vec<(u8, bool)> {
     edges
 }
 
-/// X11 `query_keymap` ポーリングによるフォールバックループを実行する。
+/// X11 `query_keymap` ポーリングによるフォールバックループを実行する（1.5 秒毎に evdev 権限獲得を再確認する）。
 fn run_x11_fallback_loop(
     shared: &Arc<Mutex<HookSharedState>>,
     stop_flag: &AtomicBool,
+    reload_flag: &AtomicBool,
     started_at: Instant,
     on_trigger: &(dyn Fn() + Send),
 ) {
+    const RESCAN_INTERVAL: Duration = Duration::from_millis(1500);
+    let cycle_started = Instant::now();
+
     let Ok((conn, _)) = x11rb::connect(None) else {
-        while !stop_flag.load(Ordering::Acquire) {
+        while !stop_flag.load(Ordering::Acquire)
+            && !reload_flag.load(Ordering::Acquire)
+            && cycle_started.elapsed() < RESCAN_INTERVAL
+        {
             thread::sleep(Duration::from_millis(NO_BACKEND_IDLE_SLEEP_MS));
         }
         return;
@@ -427,7 +478,10 @@ fn run_x11_fallback_loop(
         .map(|reply| reply.keys)
         .unwrap_or([0u8; 32]);
 
-    while !stop_flag.load(Ordering::Acquire) {
+    while !stop_flag.load(Ordering::Acquire)
+        && !reload_flag.load(Ordering::Acquire)
+        && cycle_started.elapsed() < RESCAN_INTERVAL
+    {
         let Ok(cookie) = conn.query_keymap() else {
             break;
         };
@@ -445,10 +499,6 @@ fn run_x11_fallback_loop(
         }
 
         thread::sleep(Duration::from_millis(X11_POLL_INTERVAL_MS));
-    }
-
-    while !stop_flag.load(Ordering::Acquire) {
-        thread::sleep(Duration::from_millis(NO_BACKEND_IDLE_SLEEP_MS));
     }
 }
 

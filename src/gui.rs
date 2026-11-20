@@ -442,6 +442,7 @@ struct SettingsDraft {
     capturing_key: bool,
     capture_rx: Option<Receiver<TriggerKey>>,
     prev_modifiers: egui::Modifiers,
+    evdev_setup_rx: Option<Receiver<Result<(), String>>>,
     error_message: Option<String>,
 }
 
@@ -460,6 +461,7 @@ impl SettingsDraft {
             capturing_key: false,
             capture_rx: None,
             prev_modifiers: egui::Modifiers::NONE,
+            evdev_setup_rx: None,
             error_message: None,
         }
     }
@@ -1205,15 +1207,89 @@ impl ClipOnApp {
             );
 
             ui.add_space(2.0);
-            let status_text = match backend_status {
+            let mut start_evdev_setup = false;
+            let mut setup_finished: Option<Result<(), String>> = None;
+            if let Some(rx) = &draft.evdev_setup_rx {
+                if let Ok(res) = rx.try_recv() {
+                    setup_finished = Some(res);
+                } else {
+                    ctx.request_repaint_after(Duration::from_millis(100));
+                }
+            }
+            if let Some(res) = setup_finished {
+                draft.evdev_setup_rx = None;
+                match res {
+                    Ok(()) => {
+                        draft.error_message = None;
+                        self.shared.keyhook.reload_devices();
+                        ctx.request_repaint_after(Duration::from_millis(120));
+                    }
+                    Err(err) => {
+                        draft.error_message = Some(err);
+                    }
+                }
+            }
+
+            match backend_status {
                 KeyHookBackend::Evdev { device_count } => {
-                    format!("✅ 全画面グローバル監視 (evdev: {device_count}台)")
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "✅ 全画面グローバル監視有効 (evdev: {device_count}台)"
+                        ))
+                        .small(),
+                    );
                 }
                 KeyHookBackend::X11Fallback => {
-                    "⚠️ X11フォールバック中（Wayland全画面対応は scripts/setup-input-access.sh を実行）".to_string()
+                    ui.label(
+                        egui::RichText::new(
+                            "⚠️ X11フォールバック中（Wayland上の他アプリでは Shift×2 等が反応しません）",
+                        )
+                        .small(),
+                    );
+                    let in_progress = draft.evdev_setup_rx.is_some();
+                    if ui
+                        .add_enabled(
+                            !in_progress,
+                            egui::Button::new(if in_progress {
+                                "🔑 権限を設定中..."
+                            } else {
+                                "🔑 全画面キー監視を有効化 (パスワード入力1回)"
+                            }),
+                        )
+                        .clicked()
+                    {
+                        start_evdev_setup = true;
+                    }
                 }
-            };
-            ui.label(egui::RichText::new(status_text).small());
+            }
+
+            if start_evdev_setup {
+                let (tx, rx) = mpsc::channel();
+                draft.evdev_setup_rx = Some(rx);
+                draft.error_message = None;
+                let notify_ctx = ctx.clone();
+                std::thread::spawn(move || {
+                    let cmd = "printf '%s\\n' 'KERNEL==\"event*\", SUBSYSTEM==\"input\", ENV{ID_INPUT_KEYBOARD}==\"1\", TAG+=\"uaccess\"' > /etc/udev/rules.d/99-clipon-input.rules && udevadm control --reload-rules && udevadm trigger --subsystem-match=input";
+                    let result = Command::new("pkexec")
+                        .args(["sh", "-c", cmd])
+                        .output()
+                        .map_err(|e| format!("pkexec の起動に失敗しました: {e}"))
+                        .and_then(|out| {
+                            if out.status.success() {
+                                Ok(())
+                            } else {
+                                let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                                if msg.is_empty() {
+                                    Err("権限設定がキャンセルまたは拒否されました".to_string())
+                                } else {
+                                    Err(format!("権限設定に失敗しました: {msg}"))
+                                }
+                            }
+                        });
+                    let _ = tx.send(result);
+                    notify_ctx.request_repaint();
+                });
+            }
 
                     if let Some(err) = &draft.error_message {
                         ui.add_space(4.0);
