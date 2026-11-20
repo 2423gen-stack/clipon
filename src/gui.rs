@@ -37,7 +37,7 @@ const IMAGE_ROW_HEIGHT: f32 = 42.0;
 const POPUP_CHROME_HEIGHT: f32 = 52.0;
 
 /// 設定ウィンドウの幅・高さ（論理ピクセル）。
-const SETTINGS_SIZE: (f32, f32) = (460.0, 440.0);
+const SETTINGS_SIZE: (f32, f32) = (480.0, 480.0);
 
 /// ポップアップ表示直後にフォーカス喪失による自動クローズを抑止する猶予時間（ミリ秒）。
 const FOCUS_LOSS_GRACE_MS: u64 = 250;
@@ -284,7 +284,7 @@ pub fn run_gui(
             .with_inner_size([POPUP_WIDTH, POPUP_MIN_HEIGHT])
             .with_visible(false)
             .with_taskbar(false)
-            .with_resizable(false)
+            .with_resizable(true)
             .with_icon(Arc::new(icon)),
         persist_window: false,
         run_and_return: true,
@@ -571,6 +571,9 @@ impl ClipOnApp {
         };
 
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(260.0, 80.0)));
+        ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(egui::vec2(800.0, 700.0)));
         ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
             egui::WindowLevel::AlwaysOnTop,
         ));
@@ -595,6 +598,9 @@ impl ClipOnApp {
         self.settings = Some(SettingsDraft::load(&self.shared));
 
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(420.0, 340.0)));
+        ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(egui::vec2(1200.0, 1000.0)));
         ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
             egui::WindowLevel::Normal,
         ));
@@ -795,6 +801,7 @@ impl ClipOnApp {
 
         let mut clicked_index: Option<usize> = None;
         let mut open_settings_clicked = false;
+        let mut close_clicked = false;
         let items = self.cached_items.clone();
         let selected_index = self.selected_index;
         let scroll_to_selection = self.scroll_to_selection;
@@ -900,6 +907,9 @@ impl ClipOnApp {
                             .color(ui.visuals().weak_text_color()),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("✕ 閉じる").clicked() {
+                            close_clicked = true;
+                        }
                         if ui.small_button("⚙ 設定").clicked() {
                             open_settings_clicked = true;
                         }
@@ -907,7 +917,9 @@ impl ClipOnApp {
                 });
             });
 
-        if open_settings_clicked {
+        if close_clicked {
+            self.hide_window(ctx);
+        } else if open_settings_clicked {
             self.open_settings(ctx);
         } else if let Some(idx) = clicked_index {
             self.confirm_selection(ctx, idx);
@@ -1033,13 +1045,42 @@ impl ClipOnApp {
         let mut toggle_capture = false;
         let backend_status = self.shared.keyhook.backend_status();
 
+        // キー録音中でない場合、Escape キーで設定画面を即座に閉じる。
+        let is_capturing = self
+            .settings
+            .as_ref()
+            .is_some_and(|draft| draft.capturing_key);
+        if !is_capturing && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            trigger_cancel = true;
+        }
+
+        egui::TopBottomPanel::bottom("clipon_settings_footer")
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("キャンセル").clicked() {
+                            trigger_cancel = true;
+                        }
+                        if ui.button("保存して閉じる").clicked() {
+                            trigger_save = true;
+                        }
+                    });
+                });
+                ui.add_space(2.0);
+            });
+
         egui::CentralPanel::default().show(ctx, |ui| {
             let Some(draft) = &mut self.settings else {
                 return;
             };
 
-            ui.heading("ClipOn 設定");
-            ui.add_space(6.0);
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.heading("ClipOn 設定");
+                    ui.add_space(6.0);
 
             // 1. 呼び出しキーバインド設定
             ui.group(|ui| {
@@ -1174,21 +1215,11 @@ impl ClipOnApp {
             };
             ui.label(egui::RichText::new(status_text).small());
 
-            if let Some(err) = &draft.error_message {
-                ui.add_space(4.0);
-                ui.colored_label(ui.visuals().error_fg_color, err);
-            }
-
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::RIGHT), |ui| {
-                ui.horizontal(|ui| {
-                    if ui.button("キャンセル").clicked() {
-                        trigger_cancel = true;
-                    }
-                    if ui.button("保存して閉じる").clicked() {
-                        trigger_save = true;
+                    if let Some(err) = &draft.error_message {
+                        ui.add_space(4.0);
+                        ui.colored_label(ui.visuals().error_fg_color, err);
                     }
                 });
-            });
         });
 
         if toggle_capture {
@@ -1207,6 +1238,7 @@ impl ClipOnApp {
                         ctx.memory_mut(|m| m.surrender_focus(focused_id));
                     }
                     self.shared.keyhook.start_capture(tx);
+                    ctx.request_repaint_after(Duration::from_millis(20));
                 }
             }
         }
@@ -1231,7 +1263,10 @@ impl eframe::App for ClipOnApp {
         }
 
         match self.mode {
-            UiMode::Hidden => {}
+            UiMode::Hidden => {
+                // eframe 初回フレーム後に内部で set_visible(true) が走る挙動を抑止し非表示常駐を維持する。
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
             UiMode::Popup => self.render_popup(ctx),
             UiMode::Settings => self.render_settings(ctx),
         }

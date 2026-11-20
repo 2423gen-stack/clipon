@@ -231,10 +231,6 @@ fn run_daemon(
 }
 
 fn main() -> ExitCode {
-    // XWayland 経由でマウス直下配置および高速 Show/Hide を保証するため、未設定時は x11 バックエンドを既定化する。
-    if std::env::var_os("WINIT_UNIX_BACKEND").is_none() && std::env::var_os("DISPLAY").is_some() {
-        std::env::set_var("WINIT_UNIX_BACKEND", "x11");
-    }
 
     let action = match parse_cli_args(std::env::args()) {
         Ok(act) => act,
