@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "clipon",
+  "project_id": "46d0962e-ef7c-41a3-afe0-0df893efd989"
+}
