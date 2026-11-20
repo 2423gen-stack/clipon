@@ -615,9 +615,9 @@ impl ClipboardWorker {
             }
             Event::SelectionClear(ev) => {
                 self.update_server_time(ev.time);
-                if ev.selection == self.atoms.CLIPBOARD {
-                    self.active_selection = None;
-                    self.incr_sends.clear();
+                if ev.selection == self.atoms.CLIPBOARD && self.is_external_owner_active() {
+                    // 遅延到着した過去の SelectionClear で最新の自己所有権を消さないよう、実所有者確認後にのみ破棄する。
+                    self.clear_active_ownership();
                 }
                 DispatchOutcome::Continue
             }
@@ -639,8 +639,7 @@ impl ClipboardWorker {
                         }
                     } else if self.is_external_owner_active() {
                         // 遅延到着した過去通知で最新の自己所有権を消さないよう、実所有者確認後にのみ更新する。
-                        self.active_selection = None;
-                        self.incr_sends.clear();
+                        self.clear_active_ownership();
                         if ev.owner != x11rb::NONE {
                             self.pending_clipboard_refresh = true;
                         }
@@ -653,16 +652,36 @@ impl ClipboardWorker {
         }
     }
 
+    /// 保持中の自己所有権および進行中の `INCR` 送信状態を破棄する。
+    fn clear_active_ownership(&mut self) {
+        self.active_selection = None;
+        self.incr_sends.clear();
+    }
+
     /// 現在の X11 `CLIPBOARD` 所有者が自分自身でないかをサーバーへ照会する。
     fn is_external_owner_active(&self) -> bool {
         if self.active_selection.is_none() {
-            return true;
+            return should_clear_ownership(
+                self.atoms.CLIPBOARD,
+                self.atoms.CLIPBOARD,
+                false,
+                None,
+                self.self_window,
+            );
         }
-        self.conn
+        let queried_owner = self
+            .conn
             .get_selection_owner(self.atoms.CLIPBOARD)
             .ok()
             .and_then(|c| c.reply().ok())
-            .is_some_and(|r| r.owner != self.self_window)
+            .map(|r| r.owner);
+        should_clear_ownership(
+            self.atoms.CLIPBOARD,
+            self.atoms.CLIPBOARD,
+            true,
+            queried_owner,
+            self.self_window,
+        )
     }
 
     /// コマンドチャネルをドレインし、`SetContent` / `QueryPointer` / `Shutdown` を実行する。
@@ -808,14 +827,14 @@ impl ClipboardWorker {
         }
 
         // リクエスタ側の PropertyNotify(DELETE) を受信できるようマスクを拡張する。
-        let current_mask = self
-            .conn
-            .get_window_attributes(requestor)
-            .ok()
-            .and_then(|c| c.reply().ok())
-            .map(|r| r.your_event_mask)
-            .unwrap_or_default();
-        let new_mask = current_mask | EventMask::PROPERTY_CHANGE;
+        // 既に破棄されたウィンドウ（BadWindow 等）なら早期中断し、不要なバッファ保持を防ぐ。
+        let Ok(attrs_cookie) = self.conn.get_window_attributes(requestor) else {
+            return x11rb::NONE;
+        };
+        let Ok(attrs) = attrs_cookie.reply() else {
+            return x11rb::NONE;
+        };
+        let new_mask = attrs.your_event_mask | EventMask::PROPERTY_CHANGE;
         if self
             .conn
             .change_window_attributes(
@@ -1199,6 +1218,23 @@ fn append_property_bytes(out: &mut Vec<u8>, reply: &GetPropertyReply) {
     out.extend_from_slice(&reply.value);
 }
 
+/// `SelectionClear` や外部所有者変更通知に対し、遅延到着した過去通知を除外して所有権を破棄すべきか判定する純粋関数。
+fn should_clear_ownership(
+    event_selection: Atom,
+    clipboard_atom: Atom,
+    has_active_selection: bool,
+    queried_owner: Option<Window>,
+    self_window: Window,
+) -> bool {
+    if event_selection != clipboard_atom {
+        return false;
+    }
+    if !has_active_selection {
+        return true;
+    }
+    queried_owner.is_some_and(|owner| owner != self_window)
+}
+
 /// `TARGETS` アトム一覧取得の結果。
 enum TargetsFetch {
     Targets(Vec<Atom>),
@@ -1406,5 +1442,64 @@ mod tests {
             decode_text_bytes(atoms.STRING, &[0xe9, b't', 0xe9], &atoms),
             "été"
         );
+    }
+
+    #[test]
+    fn should_clear_ownership_guards_against_delayed_events() {
+        let atoms = make_test_atoms();
+        let self_win: Window = 0x1000;
+        let other_win: Window = 0x2000;
+
+        // CLIPBOARD 以外のセレクションイベントでは破棄しない。
+        assert!(!should_clear_ownership(
+            999,
+            atoms.CLIPBOARD,
+            true,
+            Some(other_win),
+            self_win,
+        ));
+
+        // 自己所有権を保持していない場合は外部所有者状態への追従を許可する。
+        assert!(should_clear_ownership(
+            atoms.CLIPBOARD,
+            atoms.CLIPBOARD,
+            false,
+            Some(self_win),
+            self_win,
+        ));
+
+        // 自己所有権保持中に実所有者が依然として self_window なら遅延通知とみなし破棄しない。
+        assert!(!should_clear_ownership(
+            atoms.CLIPBOARD,
+            atoms.CLIPBOARD,
+            true,
+            Some(self_win),
+            self_win,
+        ));
+
+        // 実所有者が他ウィンドウまたは NONE へ移っていれば破棄する。
+        assert!(should_clear_ownership(
+            atoms.CLIPBOARD,
+            atoms.CLIPBOARD,
+            true,
+            Some(other_win),
+            self_win,
+        ));
+        assert!(should_clear_ownership(
+            atoms.CLIPBOARD,
+            atoms.CLIPBOARD,
+            true,
+            Some(x11rb::NONE),
+            self_win,
+        ));
+
+        // サーバー照会に失敗した場合は誤破棄を避けるため false とする。
+        assert!(!should_clear_ownership(
+            atoms.CLIPBOARD,
+            atoms.CLIPBOARD,
+            true,
+            None,
+            self_win,
+        ));
     }
 }
