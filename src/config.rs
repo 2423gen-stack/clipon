@@ -34,6 +34,8 @@ pub struct AppConfig {
     pub paste: PasteConfig,
     /// ファイルおよび画像の転送モード設定。
     pub media: MediaConfig,
+    /// ポップアップウィンドウの表示位置記憶設定。
+    pub popup: PopupConfig,
 }
 
 /// 呼び出しトリガーのキーおよびタップ判定設定。
@@ -96,6 +98,16 @@ pub struct MediaConfig {
     pub file_mode: FileMode,
     /// 画像コピー選択時のモード。
     pub image_mode: ImageMode,
+}
+
+/// ポップアップウィンドウの表示位置記憶設定。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PopupConfig {
+    /// 前回閉じたときの X 座標（論理ピクセル）。`None` の場合は自動配置。
+    pub pos_x: Option<i32>,
+    /// 前回閉じたときの Y 座標（論理ピクセル）。`None` の場合は自動配置。
+    pub pos_y: Option<i32>,
 }
 
 impl Default for TriggerConfig {
@@ -346,6 +358,8 @@ mod tests {
         assert_eq!(cfg.paste.paste_key, "Ctrl+v");
         assert_eq!(cfg.media.file_mode, FileMode::Path);
         assert_eq!(cfg.media.image_mode, ImageMode::Image);
+        assert_eq!(cfg.popup.pos_x, None);
+        assert_eq!(cfg.popup.pos_y, None);
     }
 
     #[test]
@@ -365,6 +379,8 @@ mod tests {
         custom.paste.paste_key = "Shift+Insert".to_string();
         custom.media.file_mode = FileMode::File;
         custom.media.image_mode = ImageMode::Path;
+        custom.popup.pos_x = Some(640);
+        custom.popup.pos_y = Some(320);
 
         custom.save_to_path(&path).expect("保存成功");
         let loaded = AppConfig::load_from_path(&path).expect("再読込成功");

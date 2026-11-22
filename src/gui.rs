@@ -136,6 +136,30 @@ pub fn clamp_popup_position(
     (x, y)
 }
 
+/// 記憶済み座標・フォールバックカーソル座標・画面中央の優先順でポップアップ表示座標を決定する。
+pub fn resolve_popup_position(
+    saved_pos: Option<(i32, i32)>,
+    fallback_anchor: Option<(i32, i32)>,
+    win_size: (f32, f32),
+    screen_size: (f32, f32),
+) -> (f32, f32) {
+    let max_x = (screen_size.0 - win_size.0).max(0.0);
+    let max_y = (screen_size.1 - win_size.1).max(0.0);
+
+    if let Some((sx, sy)) = saved_pos {
+        return ((sx as f32).clamp(0.0, max_x), (sy as f32).clamp(0.0, max_y));
+    }
+
+    if let Some((ax, ay)) = fallback_anchor {
+        // Wayland 環境等で XQueryPointer が (0, 0) しか返せない場合は画面中央を優先する。
+        if ax != 0 || ay != 0 {
+            return clamp_popup_position((ax, ay), win_size, screen_size);
+        }
+    }
+
+    (max_x * 0.5, max_y * 0.5)
+}
+
 /// リスト選択インデックスを前後へ移動し、先頭・末尾でラップする。空リストでは `0` を返す。
 pub fn move_selection(current: usize, delta: isize, len: usize) -> usize {
     if len == 0 {
@@ -480,11 +504,18 @@ struct ClipOnApp {
     thumbnails: HashMap<u64, egui::TextureHandle>,
     failed_thumbnails: HashSet<u64>,
     settings: Option<SettingsDraft>,
+    last_popup_pos: Option<(i32, i32)>,
+    pending_popup_pos: Option<(f32, f32)>,
 }
 
 impl ClipOnApp {
     /// 新しい `ClipOnApp` を非表示状態で初期化する。
     fn new(shared: Arc<AppState>, ui_rx: Receiver<UiCommand>) -> Self {
+        let initial_pos = shared
+            .config
+            .lock()
+            .ok()
+            .and_then(|cfg| cfg.popup.pos_x.zip(cfg.popup.pos_y));
         Self {
             shared,
             ui_rx,
@@ -497,6 +528,8 @@ impl ClipOnApp {
             thumbnails: HashMap::new(),
             failed_thumbnails: HashSet::new(),
             settings: None,
+            last_popup_pos: initial_pos,
+            pending_popup_pos: None,
         }
     }
 
@@ -517,6 +550,36 @@ impl ClipOnApp {
             .retain(|hash| live_hashes.contains(hash));
     }
 
+    /// 現在のポップアップ表示位置を読み取り、前回保存値と異なっていれば `config.toml` へ永続化する。
+    fn persist_popup_position(&mut self, ctx: &egui::Context) {
+        if self.pending_popup_pos.is_none() {
+            if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
+                self.last_popup_pos = Some((rect.min.x.round() as i32, rect.min.y.round() as i32));
+            }
+        }
+        let Some((x, y)) = self.last_popup_pos else {
+            return;
+        };
+
+        let updated_cfg = if let Ok(mut cfg) = self.shared.config.lock() {
+            if cfg.popup.pos_x == Some(x) && cfg.popup.pos_y == Some(y) {
+                None
+            } else {
+                cfg.popup.pos_x = Some(x);
+                cfg.popup.pos_y = Some(y);
+                Some(cfg.clone())
+            }
+        } else {
+            None
+        };
+
+        if let Some(cfg) = updated_cfg {
+            if let Err(err) = cfg.save_to_path(&self.shared.config_path) {
+                eprintln!("ClipOn 警告: ポップアップ位置の保存に失敗しました: {err}");
+            }
+        }
+    }
+
     /// 設定画面でのキー録音状態を安全に停止する。
     fn stop_capture_if_active(&mut self) {
         if let Some(draft) = &mut self.settings {
@@ -530,6 +593,10 @@ impl ClipOnApp {
 
     /// ウィンドウを非表示化して常駐待機状態 (`UiMode::Hidden`) へ戻す。
     fn hide_window(&mut self, ctx: &egui::Context) {
+        if self.mode == UiMode::Popup {
+            self.persist_popup_position(ctx);
+        }
+        self.pending_popup_pos = None;
         self.stop_capture_if_active();
         self.mode = UiMode::Hidden;
         self.opened_at = None;
@@ -537,7 +604,7 @@ impl ClipOnApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
     }
 
-    /// ポップアップウィンドウを指定位置（またはカーソル直下）へ表示する。
+    /// ポップアップウィンドウを記憶済み位置（未設定時はカーソル直下または画面中央）へ表示する。
     fn open_popup(&mut self, ctx: &egui::Context, anchor: Option<(i32, i32)>) {
         self.stop_capture_if_active();
         self.settings = None;
@@ -557,20 +624,23 @@ impl ClipOnApp {
             .filter(|&(w, h)| w > 1.0 && h > 1.0)
             .unwrap_or((1920.0, 1080.0));
 
+        let saved_pos = self.last_popup_pos.or_else(|| {
+            self.shared
+                .config
+                .lock()
+                .ok()
+                .and_then(|cfg| cfg.popup.pos_x.zip(cfg.popup.pos_y))
+        });
+
         let raw_anchor = anchor.or_else(|| self.shared.clipboard.query_pointer());
-        let clamped_pos = match raw_anchor {
-            Some((ax, ay)) => {
-                let logical_anchor = (
-                    (ax as f32 / ppp).round() as i32,
-                    (ay as f32 / ppp).round() as i32,
-                );
-                clamp_popup_position(logical_anchor, win_size, screen_size)
-            }
-            None => (
-                (screen_size.0 - win_size.0).max(0.0) * 0.5,
-                (screen_size.1 - win_size.1).max(0.0) * 0.5,
-            ),
-        };
+        let logical_anchor = raw_anchor.map(|(ax, ay)| {
+            (
+                (ax as f32 / ppp).round() as i32,
+                (ay as f32 / ppp).round() as i32,
+            )
+        });
+        let clamped_pos = resolve_popup_position(saved_pos, logical_anchor, win_size, screen_size);
+        self.pending_popup_pos = Some(clamped_pos);
 
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(true));
@@ -594,6 +664,10 @@ impl ClipOnApp {
 
     /// シンプル設定ウィンドウを表示する。
     fn open_settings(&mut self, ctx: &egui::Context) {
+        if self.mode == UiMode::Popup {
+            self.persist_popup_position(ctx);
+        }
+        self.pending_popup_pos = None;
         self.stop_capture_if_active();
         self.mode = UiMode::Settings;
         self.opened_at = None;
@@ -630,6 +704,9 @@ impl ClipOnApp {
                     }
                 }
                 UiCommand::Quit => {
+                    if self.mode == UiMode::Popup {
+                        self.persist_popup_position(ctx);
+                    }
                     self.stop_capture_if_active();
                     self.allow_exit = true;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -793,6 +870,15 @@ impl ClipOnApp {
 
     /// ポップアップ UI を描画する。
     fn render_popup(&mut self, ctx: &egui::Context) {
+        if let Some(pos) = self.pending_popup_pos.take() {
+            // XWayland / WM のマップ直後の位置リセットに備えて描画フレームでも配置を再適用する。
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+                pos.0, pos.1,
+            )));
+        } else if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
+            self.last_popup_pos = Some((rect.min.x.round() as i32, rect.min.y.round() as i32));
+        }
+
         if let Some(idx) = self.handle_popup_input(ctx) {
             self.confirm_selection(ctx, idx);
             return;
@@ -1002,6 +1088,9 @@ impl ClipOnApp {
             self.shared.keyhook.stop_capture();
         }
 
+        if let Ok(cfg_guard) = self.shared.config.lock() {
+            draft.config.popup = cfg_guard.popup.clone();
+        }
         draft.config.sanitize();
 
         if let Err(err) = parse_paste_shortcut(&draft.config.paste.paste_key) {
@@ -1434,5 +1523,33 @@ mod tests {
             Some("space".to_string())
         );
         assert_eq!(egui_key_to_trigger_name(egui::Key::F24), None);
+    }
+
+    #[test]
+    fn resolve_popup_position_prefers_saved_position_and_centers_when_origin_unavailable() {
+        let win = (420.0, 300.0);
+        let screen = (1920.0, 1080.0);
+
+        // 記憶済み座標がある場合はカーソル座標や中央より優先し、画面内にクランプする
+        assert_eq!(
+            resolve_popup_position(Some((700, 400)), Some((100, 100)), win, screen),
+            (700.0, 400.0)
+        );
+        assert_eq!(
+            resolve_popup_position(Some((1800, 950)), None, win, screen),
+            (1500.0, 780.0)
+        );
+
+        // 未保存かつ XQueryPointer が (0, 0) の場合は左上張り付きではなく画面中央にする
+        assert_eq!(
+            resolve_popup_position(None, Some((0, 0)), win, screen),
+            (750.0, 390.0)
+        );
+
+        // 未保存かつ有効なカーソル座標がある場合はカーソル少し右下に表示する
+        assert_eq!(
+            resolve_popup_position(None, Some((200, 300)), win, screen),
+            (208.0, 308.0)
+        );
     }
 }
