@@ -264,12 +264,14 @@ pub fn encode_uri_list(paths: &[PathBuf]) -> String {
     out
 }
 
-/// 画像キャッシュディレクトリ内に `clipon_img_{hash:016x}.png` を原子的に生成または再利用し、パスを返す。
+/// 画像キャッシュディレクトリ (`0700`) 内に `clipon_img_{hash:016x}.png` (`0600`) を原子的に生成または再利用し、パスを返す。
 pub fn ensure_cached_image_path(
     cache_dir: &Path,
     hash: u64,
     png_bytes: &[u8],
 ) -> Result<PathBuf, String> {
+    use std::os::unix::fs::PermissionsExt;
+
     if png_bytes.is_empty() {
         return Err("画像データが空のためキャッシュを作成できません".to_string());
     }
@@ -280,9 +282,16 @@ pub fn ensure_cached_image_path(
             cache_dir.display()
         )
     })?;
+    std::fs::set_permissions(cache_dir, std::fs::Permissions::from_mode(0o700)).map_err(|err| {
+        format!(
+            "画像キャッシュディレクトリの権限設定 (0700) に失敗しました ({}): {err}",
+            cache_dir.display()
+        )
+    })?;
 
     let target_path = cache_dir.join(format!("clipon_img_{hash:016x}.png"));
     if target_path.exists() {
+        let _ = std::fs::set_permissions(&target_path, std::fs::Permissions::from_mode(0o600));
         return Ok(target_path);
     }
 
@@ -296,6 +305,14 @@ pub fn ensure_cached_image_path(
             tmp_path.display()
         )
     })?;
+
+    if let Err(err) = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600)) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(format!(
+            "画像キャッシュ一時ファイルの権限設定 (0600) に失敗しました ({}): {err}",
+            tmp_path.display()
+        ));
+    }
 
     if let Err(err) = std::fs::rename(&tmp_path, &target_path) {
         let _ = std::fs::remove_file(&tmp_path);
@@ -559,5 +576,36 @@ mod tests {
         let second =
             ensure_cached_image_path(&cache_dir, hash, &png_bytes).expect("キャッシュ再利用成功");
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn cached_image_and_dir_permissions_are_restricted() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().expect("TempDir作成");
+        let cache_dir = dir.path().join("private_cache");
+        let png_bytes = b"\x89PNG\r\n\x1a\nsecret".to_vec();
+        let path = ensure_cached_image_path(&cache_dir, 0x1234_5678, &png_bytes)
+            .expect("キャッシュ生成成功");
+
+        let dir_mode = std::fs::metadata(&cache_dir)
+            .expect("キャッシュディレクトリのメタデータ取得")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            dir_mode, 0o700,
+            "画像キャッシュディレクトリは所有者限定の 0700 であるべき (actual: {dir_mode:04o})"
+        );
+
+        let file_mode = std::fs::metadata(&path)
+            .expect("キャッシュ画像のメタデータ取得")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            file_mode, 0o600,
+            "画像キャッシュファイルは所有者限定の 0600 であるべき (actual: {file_mode:04o})"
+        );
     }
 }

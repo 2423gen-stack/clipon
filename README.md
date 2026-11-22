@@ -106,6 +106,15 @@ clipon --help       Print CLI help
 
 ---
 
+### Changelog — What's New in v1.1.0
+
+- **IPC Socket Hardening (`0600`)**: The Unix domain socket (`$XDG_RUNTIME_DIR/clipon.sock` or `/tmp/clipon-<uid>.sock`) is now strictly locked to owner-only permissions (`0600`) upon binding, preventing unauthorized local users on multi-user systems from sending `QUIT` or UI disruption commands.
+- **Private Image Cache & Config Permissions (`0700` / `0600`)**: The image cache directory (`~/.cache/clipon`) is now enforced at `0700` and all cached PNG screenshots and atomic config writes (`config.toml`) are enforced at `0600`, protecting sensitive clipboard screenshots from local information disclosure.
+- **State Machine Self-Healing (Orphaned Ghost Key Purge)**: `TriggerDetector` now tracks per-key press timestamps and automatically purges stale held-key states (`> 2000 ms`) if the OS drops a `KeyRelease` event (e.g., during suspend/resume, compositor focus grabs, or USB reconnects), preventing permanent trigger deadlocks.
+- **100% Safe Rust Guarantee (`#![forbid(unsafe_code)]`)**: Enforced compile-time prohibition of `unsafe` blocks across the entire library and binary crate.
+
+---
+
 <a id="日本語"></a>
 
 ## 日本語
@@ -177,3 +186,13 @@ pos_y = 320         # 前回閉じたポップアップ Y 座標
 [ui]
 language = "ja"     # UI表示言語: "ja" (日本語) | "en" (English)
 ```
+
+---
+
+### 更新履歴 (Changelog)
+
+#### v1.1.0 — セキュリティ要塞化 ＆ ステートマシン自己治癒アップデート
+- **IPC ソケットの権限制限 (`0600`)**: UNIXドメインソケット（`$XDG_RUNTIME_DIR/clipon.sock` または `/tmp/clipon-<uid>.sock`）のパーミッションをバインド直後に所有者限定 (`0600`) へ厳格化し、マルチユーザー環境における他ユーザーからの不正コマンド送信（`QUIT` や画面表示妨害）をカーネルレベルで遮断。
+- **画像キャッシュ ＆ 設定ファイルのプライバシー保護 (`0700` / `0600`)**: 画像キャッシュディレクトリ (`~/.cache/clipon`) を `0700`、一時保存されるPNG画像および原子的設定ファイル書き込み (`config.toml`) を `0600` に統一し、機密性の高いスクリーンショット等のローカル漏洩を防止。
+- **トリガー検知ステートマシンの自己治癒機構（幽霊キー自動パージ）**: OSのスリープ復帰・ウィンドウフォーカス切り替え・USBキーボード瞬断等で `KeyRelease` イベントが欠落した際、`held_keys` に残留した幽霊キー（`2,000 ms` 超過）を次のキー押下時に自動パージし、`Shift`×2 が永久不発になるデッドロックを解消。
+- **完全 Safe Rust 保証 (`#![forbid(unsafe_code)]`)**: ライブラリおよびバイナリ全体で `unsafe` コードをコンパイルレベルで完全禁止。

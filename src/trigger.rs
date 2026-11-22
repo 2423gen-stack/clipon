@@ -1,10 +1,13 @@
 //! グローバルキー入力から呼び出しトリガー（連続タップ・修飾キーコンボ）を検知するステートマシン。
 
 use crate::config::TriggerConfig;
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 /// 単一タップとして許容する最大押下時間（ミリ秒）。
 const MAX_TAP_HOLD_MS: u64 = 500;
+/// OS からのキー解放イベント欠落（スリープ復帰・フォーカス奪取・USB瞬断等）による
+/// 幽霊キー残留（永久デッドロック）を自己治癒するための最大押下保持時間（ミリ秒）。
+const STALE_HELD_KEY_TIMEOUT_MS: u64 = 2_000;
 
 /// 正規化されたトリガーキー識別子。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -101,7 +104,7 @@ pub fn canonical_key_name(key: &TriggerKey) -> String {
 #[derive(Debug, Clone)]
 pub struct TriggerDetector {
     spec: TriggerSpec,
-    held_keys: HashSet<TriggerKey>,
+    held_keys: HashMap<TriggerKey, u64>,
     press_started_at: Option<u64>,
     tainted: bool,
     tap_streak: u8,
@@ -113,7 +116,7 @@ impl TriggerDetector {
     pub fn new(spec: TriggerSpec) -> Self {
         Self {
             spec,
-            held_keys: HashSet::new(),
+            held_keys: HashMap::new(),
             press_started_at: None,
             tainted: false,
             tap_streak: 0,
@@ -124,6 +127,7 @@ impl TriggerDetector {
     /// 検知条件を更新し、進行中のタップ状態をリセットする。
     pub fn update_spec(&mut self, spec: TriggerSpec) {
         self.spec = spec;
+        self.held_keys.clear();
         self.press_started_at = None;
         self.tainted = false;
         self.tap_streak = 0;
@@ -133,11 +137,16 @@ impl TriggerDetector {
     /// 単一のキー押下／解放イベントを処理し、トリガー発火時に `true` を返す。
     pub fn on_key_event(&mut self, key: &TriggerKey, pressed: bool, now_ms: u64) -> bool {
         if pressed {
+            // 解放イベント欠落で残留した幽霊キーを自動パージして永久デッドロックを防ぐ
+            self.held_keys.retain(|_, &mut pressed_at| {
+                now_ms.saturating_sub(pressed_at) <= STALE_HELD_KEY_TIMEOUT_MS
+            });
             // OS のキーリピートによる重複押下は無視する
-            if !self.held_keys.insert(key.clone()) {
+            if self.held_keys.contains_key(key) {
                 return false;
             }
-        } else if !self.held_keys.remove(key) {
+            self.held_keys.insert(key.clone(), now_ms);
+        } else if self.held_keys.remove(key).is_none() {
             return false;
         }
 
@@ -156,7 +165,7 @@ impl TriggerDetector {
                 .spec
                 .modifiers
                 .iter()
-                .all(|modifier| self.held_keys.contains(modifier))
+                .all(|modifier| self.held_keys.contains_key(modifier))
     }
 
     /// 単一キーの連続タップモードの判定を行う。
@@ -405,5 +414,26 @@ mod tests {
         assert_eq!(spec.main_key, TriggerKey::Shift);
         assert_eq!(spec.tap_count, 1);
         assert_eq!(spec.display_string(), "Shift");
+    }
+
+    #[test]
+    fn orphaned_held_key_self_heals_after_stale_timeout() {
+        let mut detector = shift_double_tap_detector();
+        let key_a = TriggerKey::Key("a".to_string());
+
+        // OS が key_a の解放イベントを取りこぼした（幽霊キー残留）ケースを模擬
+        assert!(!detector.on_key_event(&key_a, true, 100));
+        // さらに Shift 自体の解放イベントも取りこぼしたケースを模擬
+        assert!(!detector.on_key_event(&TriggerKey::Shift, true, 200));
+
+        // タイムアウト経過後（例: 3000ms 経過した t=3500）に Shift x2 を叩いた際、
+        // 残留していた幽霊キーが自動パージされて正常に発火すること
+        assert!(!detector.on_key_event(&TriggerKey::Shift, true, 3_500));
+        assert!(!detector.on_key_event(&TriggerKey::Shift, false, 3_550));
+        assert!(!detector.on_key_event(&TriggerKey::Shift, true, 3_700));
+        assert!(
+            detector.on_key_event(&TriggerKey::Shift, false, 3_750),
+            "幽霊キーが自己治癒によりパージされ、Shift x2 が正常発火するべき"
+        );
     }
 }

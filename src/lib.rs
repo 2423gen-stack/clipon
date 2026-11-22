@@ -1,4 +1,5 @@
 //! ClipOn ライブラリルート。
+#![forbid(unsafe_code)]
 
 pub mod clipboard;
 pub mod config;

@@ -327,8 +327,10 @@ fn quote_desktop_exec_path(exec_path: &Path) -> String {
     escaped
 }
 
-/// 同一ディレクトリ内の一時ファイルを経由して原子的にファイルを書き込む。
+/// 同一ディレクトリ内の一時ファイルを経由して所有者限定権限 (`0600`) で原子的にファイルを書き込む。
 fn atomic_write_file(path: &Path, content: &[u8]) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -352,6 +354,16 @@ fn atomic_write_file(path: &Path, content: &[u8]) -> Result<(), String> {
             tmp_path.display()
         )
     })?;
+
+    if let Err(err) =
+        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))
+    {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(format!(
+            "一時ファイルのパーミッション設定 (0600) に失敗しました ({}): {err}",
+            tmp_path.display()
+        ));
+    }
 
     if let Err(err) = std::fs::rename(&tmp_path, path) {
         let _ = std::fs::remove_file(&tmp_path);
@@ -481,5 +493,25 @@ max_items = 5000
 
         // 既に存在しない状態で無効化しても Ok(()) を返すこと
         set_autostart_at(&desktop_path, exec_path, false).expect("冪等な無効化");
+    }
+
+    #[test]
+    fn saved_config_file_permissions_are_strictly_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().expect("TempDir作成");
+        let config_path = dir.path().join("clipon").join("config.toml");
+        let cfg = AppConfig::default();
+        cfg.save_to_path(&config_path).expect("設定保存成功");
+
+        let mode = std::fs::metadata(&config_path)
+            .expect("メタデータ取得成功")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "設定ファイルのパーミッションは所有者限定の 0600 であるべき (actual: {mode:04o})"
+        );
     }
 }

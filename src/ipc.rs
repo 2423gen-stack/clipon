@@ -1,7 +1,7 @@
 //! Unix ドメインソケット (UDS) を用いた単一インスタンス制御および IPC 通信モジュール。
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
@@ -106,6 +106,13 @@ impl IpcServer {
         let listener = UnixListener::bind(path).map_err(|e| {
             format!(
                 "IPC ソケット ({}) のバインドに失敗しました: {e}",
+                path.display()
+            )
+        })?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
+            let _ = std::fs::remove_file(path);
+            format!(
+                "IPC ソケット ({}) のパーミッション設定 (0600) に失敗しました: {e}",
                 path.display()
             )
         })?;
@@ -223,6 +230,25 @@ mod tests {
         assert!(
             !sock_path.exists(),
             "IpcServer ドロップ時にソケットファイルが削除されるべき"
+        );
+    }
+
+    #[test]
+    fn ipc_socket_permissions_are_strictly_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().expect("TempDir の作成に失敗");
+        let sock_path = dir.path().join("secure.sock");
+        let _server = IpcServer::bind(&sock_path).expect("バインドに失敗");
+
+        let mode = std::fs::metadata(&sock_path)
+            .expect("ソケットメタデータの取得に失敗")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "IPC ソケットのパーミッションは所有者限定の 0600 であるべき (actual: {mode:04o})"
         );
     }
 }
