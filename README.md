@@ -77,7 +77,7 @@ ClipOn checks the following environment variables and system interfaces at runti
 #### 1. Build & Install
 
 ```bash
-git clone https://github.com/gen-yokoyama/ClipOn.git
+git clone https://github.com/2423gen-stack/ClipOn.git
 cd ClipOn
 cargo build --release
 mkdir -p ~/.local/bin
