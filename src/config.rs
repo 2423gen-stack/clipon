@@ -36,6 +36,8 @@ pub struct AppConfig {
     pub media: MediaConfig,
     /// ポップアップウィンドウの表示位置記憶設定。
     pub popup: PopupConfig,
+    /// UI 表示言語設定。
+    pub ui: UiConfig,
 }
 
 /// 呼び出しトリガーのキーおよびタップ判定設定。
@@ -108,6 +110,25 @@ pub struct PopupConfig {
     pub pos_x: Option<i32>,
     /// 前回閉じたときの Y 座標（論理ピクセル）。`None` の場合は自動配置。
     pub pos_y: Option<i32>,
+}
+
+/// UI の表示言語。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UiLanguage {
+    /// 日本語表示。
+    #[default]
+    Ja,
+    /// 英語表示。
+    En,
+}
+
+/// UI 表示に関する最小設定。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiConfig {
+    /// 表示言語（`"ja"` または `"en"`）。
+    pub language: UiLanguage,
 }
 
 impl Default for TriggerConfig {
@@ -360,6 +381,7 @@ mod tests {
         assert_eq!(cfg.media.image_mode, ImageMode::Image);
         assert_eq!(cfg.popup.pos_x, None);
         assert_eq!(cfg.popup.pos_y, None);
+        assert_eq!(cfg.ui.language, UiLanguage::Ja);
     }
 
     #[test]
@@ -381,6 +403,7 @@ mod tests {
         custom.media.image_mode = ImageMode::Path;
         custom.popup.pos_x = Some(640);
         custom.popup.pos_y = Some(320);
+        custom.ui.language = UiLanguage::En;
 
         custom.save_to_path(&path).expect("保存成功");
         let loaded = AppConfig::load_from_path(&path).expect("再読込成功");

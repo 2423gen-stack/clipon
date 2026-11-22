@@ -13,7 +13,7 @@ use image::ImageFormat;
 use crate::clipboard::{ClipboardHandle, OutgoingPayload};
 use crate::config::{
     autostart_desktop_path, is_autostart_enabled_at, set_autostart_at, AppConfig, FileMode,
-    ImageMode,
+    ImageMode, UiLanguage,
 };
 use crate::history::{
     index_for_shortcut_char, shortcut_char_for_index, ClipContent, ClipItem, HistoryStore,
@@ -22,6 +22,14 @@ use crate::keyhook::{KeyHookBackend, KeyHookHandle};
 use crate::paste::parse_paste_shortcut;
 use crate::tray::build_tray_icon_argb32;
 use crate::trigger::{canonical_key_name, TriggerKey};
+
+/// 指定された表示言語 (`UiLanguage`) に応じて日本語または英語の静的文言を返す。
+pub fn tr(lang: UiLanguage, ja: &'static str, en: &'static str) -> &'static str {
+    match lang {
+        UiLanguage::Ja => ja,
+        UiLanguage::En => en,
+    }
+}
 
 /// ポップアップウィンドウの固定幅（論理ピクセル）。
 const POPUP_WIDTH: f32 = 420.0;
@@ -671,7 +679,9 @@ impl ClipOnApp {
         self.stop_capture_if_active();
         self.mode = UiMode::Settings;
         self.opened_at = None;
-        self.settings = Some(SettingsDraft::load(&self.shared));
+        let draft = SettingsDraft::load(&self.shared);
+        let lang = draft.config.ui.language;
+        self.settings = Some(draft);
 
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(true));
@@ -680,7 +690,9 @@ impl ClipOnApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
             egui::WindowLevel::Normal,
         ));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title("ClipOn 設定".to_string()));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(
+            tr(lang, "ClipOn 設定", "ClipOn Settings").to_string(),
+        ));
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
             SETTINGS_SIZE.0,
             SETTINGS_SIZE.1,
@@ -887,6 +899,12 @@ impl ClipOnApp {
             return;
         }
 
+        let lang = self
+            .shared
+            .config
+            .lock()
+            .map(|cfg| cfg.ui.language)
+            .unwrap_or(UiLanguage::Ja);
         let mut clicked_index: Option<usize> = None;
         let mut open_settings_clicked = false;
         let mut close_clicked = false;
@@ -909,8 +927,12 @@ impl ClipOnApp {
                     ui.vertical_centered(|ui| {
                         ui.add_space(16.0);
                         ui.label(
-                            egui::RichText::new("クリップボード履歴はまだありません")
-                                .color(ui.visuals().weak_text_color()),
+                            egui::RichText::new(tr(
+                                lang,
+                                "クリップボード履歴はまだありません",
+                                "No clipboard history yet",
+                            ))
+                            .color(ui.visuals().weak_text_color()),
                         );
                         ui.add_space(16.0);
                     });
@@ -959,7 +981,7 @@ impl ClipOnApp {
                                             }
                                         }
 
-                                        let label_text = item.display_label(52);
+                                        let label_text = item.display_label_for_lang(52, lang);
                                         ui.add(
                                             egui::Label::new(label_text)
                                                 .truncate()
@@ -990,15 +1012,25 @@ impl ClipOnApp {
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.label(
-                        egui::RichText::new("↑↓+Enter / 1-9,a-z で貼付")
-                            .small()
-                            .color(ui.visuals().weak_text_color()),
+                        egui::RichText::new(tr(
+                            lang,
+                            "↑↓+Enter / 1-9,a-z で貼付",
+                            "↑↓+Enter / 1-9,a-z to paste",
+                        ))
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("✕ 閉じる").clicked() {
+                        if ui
+                            .small_button(tr(lang, "✕ 閉じる", "✕ Close"))
+                            .clicked()
+                        {
                             close_clicked = true;
                         }
-                        if ui.small_button("⚙ 設定").clicked() {
+                        if ui
+                            .small_button(tr(lang, "⚙ 設定", "⚙ Settings"))
+                            .clicked()
+                        {
                             open_settings_clicked = true;
                         }
                     });
@@ -1094,7 +1126,11 @@ impl ClipOnApp {
         draft.config.sanitize();
 
         if let Err(err) = parse_paste_shortcut(&draft.config.paste.paste_key) {
-            draft.error_message = Some(format!("貼り付けキーの指定が不正です: {err}"));
+            let lang = draft.config.ui.language;
+            draft.error_message = Some(match lang {
+                UiLanguage::Ja => format!("貼り付けキーの指定が不正です: {err}"),
+                UiLanguage::En => format!("Invalid paste key shortcut: {err}"),
+            });
             self.settings = Some(draft);
             return;
         }
@@ -1136,6 +1172,12 @@ impl ClipOnApp {
         let mut toggle_capture = false;
         let backend_status = self.shared.keyhook.backend_status();
 
+        let current_lang = self
+            .settings
+            .as_ref()
+            .map(|draft| draft.config.ui.language)
+            .unwrap_or(UiLanguage::Ja);
+
         // キー録音中でない場合、Escape キーで設定画面を即座に閉じる。
         let is_capturing = self
             .settings
@@ -1151,10 +1193,16 @@ impl ClipOnApp {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("キャンセル").clicked() {
+                        if ui
+                            .button(tr(current_lang, "キャンセル", "Cancel"))
+                            .clicked()
+                        {
                             trigger_cancel = true;
                         }
-                        if ui.button("保存して閉じる").clicked() {
+                        if ui
+                            .button(tr(current_lang, "保存して閉じる", "Save & Close"))
+                            .clicked()
+                        {
                             trigger_save = true;
                         }
                     });
@@ -1170,215 +1218,312 @@ impl ClipOnApp {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    ui.heading("ClipOn 設定");
+                    let prev_lang = draft.config.ui.language;
+                    ui.horizontal(|ui| {
+                        ui.heading(tr(prev_lang, "ClipOn 設定", "ClipOn Settings"));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.radio_value(
+                                &mut draft.config.ui.language,
+                                UiLanguage::En,
+                                "English",
+                            );
+                            ui.radio_value(
+                                &mut draft.config.ui.language,
+                                UiLanguage::Ja,
+                                "日本語",
+                            );
+                            ui.label("🌐");
+                        });
+                    });
+                    let lang = draft.config.ui.language;
+                    if lang != prev_lang {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Title(
+                            tr(lang, "ClipOn 設定", "ClipOn Settings").to_string(),
+                        ));
+                    }
                     ui.add_space(6.0);
 
-            // 1. 呼び出しキーバインド設定
-            ui.group(|ui| {
-                ui.set_min_width(ui.available_width());
-                ui.label(egui::RichText::new("呼び出しキーバインド").strong());
-                ui.horizontal(|ui| {
-                    ui.label("呼び出しキー:");
-                    if draft.capturing_key {
-                        ui.add_enabled(
-                            false,
-                            egui::TextEdit::singleline(&mut "キーを押してください...".to_string())
-                                .desired_width(140.0),
+                    // 1. 呼び出しキーバインド設定
+                    ui.group(|ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.label(
+                            egui::RichText::new(tr(
+                                lang,
+                                "呼び出しキーバインド",
+                                "Trigger Keybinding",
+                            ))
+                            .strong(),
                         );
-                    } else {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut draft.config.trigger.key)
-                                .desired_width(140.0),
+                        ui.horizontal(|ui| {
+                            ui.label(tr(lang, "呼び出しキー:", "Trigger Key:"));
+                            if draft.capturing_key {
+                                let mut waiting_text =
+                                    tr(lang, "キーを押してください...", "Press any key...")
+                                        .to_string();
+                                ui.add_enabled(
+                                    false,
+                                    egui::TextEdit::singleline(&mut waiting_text)
+                                        .desired_width(140.0),
+                                );
+                            } else {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut draft.config.trigger.key)
+                                        .desired_width(140.0),
+                                );
+                            }
+                            let btn_label = if draft.capturing_key {
+                                tr(lang, "録音キャンセル", "Cancel Capture")
+                            } else {
+                                tr(lang, "キーを押して設定", "Press to Record")
+                            };
+                            if ui.button(btn_label).clicked() {
+                                toggle_capture = true;
+                            }
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.label(tr(lang, "タップ回数:", "Tap Count:"));
+                            ui.radio_value(
+                                &mut draft.config.trigger.tap_count,
+                                1,
+                                tr(lang, "1回", "1x"),
+                            );
+                            ui.radio_value(
+                                &mut draft.config.trigger.tap_count,
+                                2,
+                                tr(lang, "2回", "2x"),
+                            );
+                            ui.radio_value(
+                                &mut draft.config.trigger.tap_count,
+                                3,
+                                tr(lang, "3回", "3x"),
+                            );
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.label(tr(lang, "連続タップ間隔:", "Tap Interval:"));
+                            ui.add(
+                                egui::DragValue::new(&mut draft.config.trigger.interval_ms)
+                                    .range(80..=2000)
+                                    .speed(10)
+                                    .suffix(" ms"),
+                            );
+                        });
+                    });
+
+                    ui.add_space(4.0);
+
+                    // 2. 履歴件数 ＆ 3. 貼り付け設定
+                    ui.group(|ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(tr(
+                                    lang,
+                                    "履歴保持件数:",
+                                    "Max History Items:",
+                                ))
+                                .strong(),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut draft.config.history.max_items)
+                                    .range(5..=200)
+                                    .speed(1)
+                                    .suffix(tr(lang, " 件", " items")),
+                            );
+                        });
+
+                        ui.add_space(2.0);
+                        ui.checkbox(
+                            &mut draft.config.paste.auto_paste,
+                            tr(
+                                lang,
+                                "選択後に直前ウィンドウへ自動貼り付け",
+                                "Auto-paste to previous window on select",
+                            ),
                         );
-                    }
-                    let btn_label = if draft.capturing_key {
-                        "録音キャンセル"
-                    } else {
-                        "キーを押して設定"
-                    };
-                    if ui.button(btn_label).clicked() {
-                        toggle_capture = true;
-                    }
-                });
-
-                ui.horizontal(|ui| {
-                    ui.label("タップ回数:");
-                    ui.radio_value(&mut draft.config.trigger.tap_count, 1, "1回");
-                    ui.radio_value(&mut draft.config.trigger.tap_count, 2, "2回");
-                    ui.radio_value(&mut draft.config.trigger.tap_count, 3, "3回");
-                });
-
-                ui.horizontal(|ui| {
-                    ui.label("連続タップ間隔:");
-                    ui.add(
-                        egui::DragValue::new(&mut draft.config.trigger.interval_ms)
-                            .range(80..=2000)
-                            .speed(10)
-                            .suffix(" ms"),
-                    );
-                });
-            });
-
-            ui.add_space(4.0);
-
-            // 2. 履歴件数 ＆ 3. 貼り付け設定
-            ui.group(|ui| {
-                ui.set_min_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("履歴保持件数:").strong());
-                    ui.add(
-                        egui::DragValue::new(&mut draft.config.history.max_items)
-                            .range(5..=200)
-                            .speed(1)
-                            .suffix(" 件"),
-                    );
-                });
-
-                ui.add_space(2.0);
-                ui.checkbox(
-                    &mut draft.config.paste.auto_paste,
-                    "選択後に直前ウィンドウへ自動貼り付け",
-                );
-                ui.horizontal(|ui| {
-                    ui.label("貼り付けキー:");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut draft.config.paste.paste_key)
-                            .desired_width(120.0),
-                    );
-                    for preset in ["Ctrl+v", "Ctrl+Shift+v", "Shift+Insert"] {
-                        if ui.small_button(preset).clicked() {
-                            draft.config.paste.paste_key = preset.to_string();
-                        }
-                    }
-                });
-            });
-
-            ui.add_space(4.0);
-
-            // 4. ファイル ＆ 画像モード
-            ui.group(|ui| {
-                ui.set_min_width(ui.available_width());
-                ui.label(egui::RichText::new("ファイル・画像転送モード").strong());
-                ui.horizontal(|ui| {
-                    ui.label("ファイル選択時:");
-                    ui.radio_value(
-                        &mut draft.config.media.file_mode,
-                        FileMode::Path,
-                        "絶対パス文字列 (path)",
-                    );
-                    ui.radio_value(
-                        &mut draft.config.media.file_mode,
-                        FileMode::File,
-                        "ファイル実体 (file)",
-                    );
-                });
-                ui.horizontal(|ui| {
-                    ui.label("画像選択時:");
-                    ui.radio_value(
-                        &mut draft.config.media.image_mode,
-                        ImageMode::Image,
-                        "画像データ貼付 (image)",
-                    );
-                    ui.radio_value(
-                        &mut draft.config.media.image_mode,
-                        ImageMode::Path,
-                        "一時ファイルパス (path)",
-                    );
-                });
-            });
-
-            ui.add_space(4.0);
-
-            // 5. OS 自動起動（REQ-7）＆ 6. 入力監視ステータス
-            ui.checkbox(
-                &mut draft.autostart,
-                "Ubuntuログイン時に自動起動して常駐する",
-            );
-
-            ui.add_space(2.0);
-            let mut start_evdev_setup = false;
-            let mut setup_finished: Option<Result<(), String>> = None;
-            if let Some(rx) = &draft.evdev_setup_rx {
-                if let Ok(res) = rx.try_recv() {
-                    setup_finished = Some(res);
-                } else {
-                    ctx.request_repaint_after(Duration::from_millis(100));
-                }
-            }
-            if let Some(res) = setup_finished {
-                draft.evdev_setup_rx = None;
-                match res {
-                    Ok(()) => {
-                        draft.error_message = None;
-                        self.shared.keyhook.reload_devices();
-                        ctx.request_repaint_after(Duration::from_millis(120));
-                    }
-                    Err(err) => {
-                        draft.error_message = Some(err);
-                    }
-                }
-            }
-
-            match backend_status {
-                KeyHookBackend::Evdev { device_count } => {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "✅ 全画面グローバル監視有効 (evdev: {device_count}台)"
-                        ))
-                        .small(),
-                    );
-                }
-                KeyHookBackend::X11Fallback => {
-                    ui.label(
-                        egui::RichText::new(
-                            "⚠️ X11フォールバック中（Wayland上の他アプリでは Shift×2 等が反応しません）",
-                        )
-                        .small(),
-                    );
-                    let in_progress = draft.evdev_setup_rx.is_some();
-                    if ui
-                        .add_enabled(
-                            !in_progress,
-                            egui::Button::new(if in_progress {
-                                "🔑 権限を設定中..."
-                            } else {
-                                "🔑 全画面キー監視を有効化 (パスワード入力1回)"
-                            }),
-                        )
-                        .clicked()
-                    {
-                        start_evdev_setup = true;
-                    }
-                }
-            }
-
-            if start_evdev_setup {
-                let (tx, rx) = mpsc::channel();
-                draft.evdev_setup_rx = Some(rx);
-                draft.error_message = None;
-                let notify_ctx = ctx.clone();
-                std::thread::spawn(move || {
-                    let cmd = "printf '%s\\n' 'KERNEL==\"event*\", SUBSYSTEM==\"input\", ENV{ID_INPUT_KEYBOARD}==\"1\", TAG+=\"uaccess\"' > /etc/udev/rules.d/99-clipon-input.rules && udevadm control --reload-rules && udevadm trigger --subsystem-match=input";
-                    let result = Command::new("pkexec")
-                        .args(["sh", "-c", cmd])
-                        .output()
-                        .map_err(|e| format!("pkexec の起動に失敗しました: {e}"))
-                        .and_then(|out| {
-                            if out.status.success() {
-                                Ok(())
-                            } else {
-                                let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
-                                if msg.is_empty() {
-                                    Err("権限設定がキャンセルまたは拒否されました".to_string())
-                                } else {
-                                    Err(format!("権限設定に失敗しました: {msg}"))
+                        ui.horizontal(|ui| {
+                            ui.label(tr(lang, "貼り付けキー:", "Paste Key:"));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut draft.config.paste.paste_key)
+                                    .desired_width(120.0),
+                            );
+                            for preset in ["Ctrl+v", "Ctrl+Shift+v", "Shift+Insert"] {
+                                if ui.small_button(preset).clicked() {
+                                    draft.config.paste.paste_key = preset.to_string();
                                 }
                             }
                         });
-                    let _ = tx.send(result);
-                    notify_ctx.request_repaint();
-                });
-            }
+                    });
+
+                    ui.add_space(4.0);
+
+                    // 4. ファイル ＆ 画像モード
+                    ui.group(|ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.label(
+                            egui::RichText::new(tr(
+                                lang,
+                                "ファイル・画像転送モード",
+                                "File & Image Transfer Mode",
+                            ))
+                            .strong(),
+                        );
+                        ui.horizontal(|ui| {
+                            ui.label(tr(lang, "ファイル選択時:", "On File Select:"));
+                            ui.radio_value(
+                                &mut draft.config.media.file_mode,
+                                FileMode::Path,
+                                tr(lang, "絶対パス文字列 (path)", "File Path (path)"),
+                            );
+                            ui.radio_value(
+                                &mut draft.config.media.file_mode,
+                                FileMode::File,
+                                tr(lang, "ファイル実体 (file)", "File URI (file)"),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(tr(lang, "画像選択時:", "On Image Select:"));
+                            ui.radio_value(
+                                &mut draft.config.media.image_mode,
+                                ImageMode::Image,
+                                tr(lang, "画像データ貼付 (image)", "Image Data (image)"),
+                            );
+                            ui.radio_value(
+                                &mut draft.config.media.image_mode,
+                                ImageMode::Path,
+                                tr(lang, "一時ファイルパス (path)", "Cached File Path (path)"),
+                            );
+                        });
+                    });
+
+                    ui.add_space(4.0);
+
+                    // 5. OS 自動起動（REQ-7）＆ 6. 入力監視ステータス
+                    ui.checkbox(
+                        &mut draft.autostart,
+                        tr(
+                            lang,
+                            "Ubuntuログイン時に自動起動して常駐する",
+                            "Launch automatically at Ubuntu login (Autostart)",
+                        ),
+                    );
+
+                    ui.add_space(2.0);
+                    let mut start_evdev_setup = false;
+                    let mut setup_finished: Option<Result<(), String>> = None;
+                    if let Some(rx) = &draft.evdev_setup_rx {
+                        if let Ok(res) = rx.try_recv() {
+                            setup_finished = Some(res);
+                        } else {
+                            ctx.request_repaint_after(Duration::from_millis(100));
+                        }
+                    }
+                    if let Some(res) = setup_finished {
+                        draft.evdev_setup_rx = None;
+                        match res {
+                            Ok(()) => {
+                                draft.error_message = None;
+                                self.shared.keyhook.reload_devices();
+                                ctx.request_repaint_after(Duration::from_millis(120));
+                            }
+                            Err(err) => {
+                                draft.error_message = Some(err);
+                            }
+                        }
+                    }
+
+                    match backend_status {
+                        KeyHookBackend::Evdev { device_count } => {
+                            let status_msg = match lang {
+                                UiLanguage::Ja => {
+                                    format!("✅ 全画面グローバル監視有効 (evdev: {device_count}台)")
+                                }
+                                UiLanguage::En => format!(
+                                    "✅ Global key monitoring active (evdev: {device_count} device(s))"
+                                ),
+                            };
+                            ui.label(egui::RichText::new(status_msg).small());
+                        }
+                        KeyHookBackend::X11Fallback => {
+                            ui.label(
+                                egui::RichText::new(tr(
+                                    lang,
+                                    "⚠️ X11フォールバック中（Wayland上の他アプリでは Shift×2 等が反応しません）",
+                                    "⚠️ X11 fallback active (double-tap won't trigger over Wayland apps)",
+                                ))
+                                .small(),
+                            );
+                            let in_progress = draft.evdev_setup_rx.is_some();
+                            if ui
+                                .add_enabled(
+                                    !in_progress,
+                                    egui::Button::new(if in_progress {
+                                        tr(
+                                            lang,
+                                            "🔑 権限を設定中...",
+                                            "🔑 Configuring permissions...",
+                                        )
+                                    } else {
+                                        tr(
+                                            lang,
+                                            "🔑 全画面キー監視を有効化 (パスワード入力1回)",
+                                            "🔑 Enable Global Key Monitoring (1x Password)",
+                                        )
+                                    }),
+                                )
+                                .clicked()
+                            {
+                                start_evdev_setup = true;
+                            }
+                        }
+                    }
+
+                    if start_evdev_setup {
+                        let (tx, rx) = mpsc::channel();
+                        draft.evdev_setup_rx = Some(rx);
+                        draft.error_message = None;
+                        let notify_ctx = ctx.clone();
+                        std::thread::spawn(move || {
+                            let cmd = "printf '%s\\n' 'KERNEL==\"event*\", SUBSYSTEM==\"input\", ENV{ID_INPUT_KEYBOARD}==\"1\", TAG+=\"uaccess\"' > /etc/udev/rules.d/99-clipon-input.rules && udevadm control --reload-rules && udevadm trigger --subsystem-match=input";
+                            let result = Command::new("pkexec")
+                                .args(["sh", "-c", cmd])
+                                .output()
+                                .map_err(|e| {
+                                    match lang {
+                                        UiLanguage::Ja => format!("pkexec の起動に失敗しました: {e}"),
+                                        UiLanguage::En => format!("Failed to start pkexec: {e}"),
+                                    }
+                                })
+                                .and_then(|out| {
+                                    if out.status.success() {
+                                        Ok(())
+                                    } else {
+                                        let msg =
+                                            String::from_utf8_lossy(&out.stderr).trim().to_string();
+                                        if msg.is_empty() {
+                                            Err(tr(
+                                                lang,
+                                                "権限設定がキャンセルまたは拒否されました",
+                                                "Permission setup was canceled or denied",
+                                            )
+                                            .to_string())
+                                        } else {
+                                            Err(match lang {
+                                                UiLanguage::Ja => {
+                                                    format!("権限設定に失敗しました: {msg}")
+                                                }
+                                                UiLanguage::En => {
+                                                    format!("Permission setup failed: {msg}")
+                                                }
+                                            })
+                                        }
+                                    }
+                                });
+                            let _ = tx.send(result);
+                            notify_ctx.request_repaint();
+                        });
+                    }
 
                     if let Some(err) = &draft.error_message {
                         ui.add_space(4.0);
@@ -1550,6 +1695,18 @@ mod tests {
         assert_eq!(
             resolve_popup_position(None, Some((200, 300)), win, screen),
             (208.0, 308.0)
+        );
+    }
+
+    #[test]
+    fn tr_returns_expected_string_for_language() {
+        assert_eq!(
+            tr(UiLanguage::Ja, "保存して閉じる", "Save & Close"),
+            "保存して閉じる"
+        );
+        assert_eq!(
+            tr(UiLanguage::En, "保存して閉じる", "Save & Close"),
+            "Save & Close"
         );
     }
 }

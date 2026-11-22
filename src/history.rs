@@ -4,6 +4,8 @@ use std::ffi::OsString;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
+use crate::config::UiLanguage;
+
 /// FNV-1a 64-bit の初期オフセット基底。
 const FNV1A_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 /// FNV-1a 64-bit の素数乗数。
@@ -44,8 +46,13 @@ pub struct ClipItem {
 }
 
 impl ClipItem {
-    /// UI 一覧向けの短縮表示ラベルを生成する。
+    /// UI 一覧向けの短縮表示ラベル（既定: 日本語）を生成する。
     pub fn display_label(&self, max_chars: usize) -> String {
+        self.display_label_for_lang(max_chars, UiLanguage::Ja)
+    }
+
+    /// 指定された表示言語に応じた UI 一覧向けの短縮表示ラベルを生成する。
+    pub fn display_label_for_lang(&self, max_chars: usize, lang: UiLanguage) -> String {
         let raw_label = match &self.content {
             ClipContent::Text(text) => text.replace("\r\n", "↵").replace(['\n', '\r'], "↵"),
             ClipContent::FilePaths(paths) => {
@@ -60,12 +67,16 @@ impl ClipItem {
                         format!("📄 {name} (+{})", paths.len() - 1)
                     }
                 } else {
-                    "📄 (空)".to_string()
+                    match lang {
+                        UiLanguage::Ja => "📄 (空)".to_string(),
+                        UiLanguage::En => "📄 (empty)".to_string(),
+                    }
                 }
             }
-            ClipContent::Image { width, height, .. } => {
-                format!("🖼️ [画像 {width}x{height}]")
-            }
+            ClipContent::Image { width, height, .. } => match lang {
+                UiLanguage::Ja => format!("🖼️ [画像 {width}x{height}]"),
+                UiLanguage::En => format!("🖼️ [Image {width}x{height}]"),
+            },
         };
 
         truncate_chars(&raw_label, max_chars)
@@ -501,6 +512,10 @@ mod tests {
             },
         };
         assert_eq!(image_item.display_label(60), "🖼️ [画像 1920x1080]");
+        assert_eq!(
+            image_item.display_label_for_lang(60, UiLanguage::En),
+            "🖼️ [Image 1920x1080]"
+        );
     }
 
     #[test]
