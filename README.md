@@ -106,7 +106,12 @@ clipon --help       Print CLI help
 
 ---
 
-### Changelog — What's New in v1.1.0
+### Changelog
+
+#### v1.1.1 — XKB `ctrl:swapcaps` & Custom Modifier Map Fix
+- **Fixed CapsLock Toggling ON & Raw `'v'` Input on Auto-Paste**: On systems with XKB modifier remapping (such as `ctrl:swapcaps` or `ctrl:nocaps`, where physical `KEY_LEFTCTRL` is mapped to `Caps_Lock`), emitting `KEY_LEFTCTRL` via `/dev/uinput` previously caused the compositor to toggle CapsLock ON and type an unmodified `'v'`. `AutoPaster` and `KeyHook` now dynamically query the X11/XWayland modifier map (`GetModifierMapping`) via `ActiveModifierMap` and resolve `Ctrl` to a non-Lock physical keycode (preferring `KEY_RIGHTCTRL` or `KEY_CAPSLOCK`), with stabilized inter-event settle timing (`8 ms`).
+
+#### v1.1.0 — Security Hardening & State Machine Self-Healing
 
 - **IPC Socket Hardening (`0600`)**: The Unix domain socket (`$XDG_RUNTIME_DIR/clipon.sock` or `/tmp/clipon-<uid>.sock`) is now strictly locked to owner-only permissions (`0600`) upon binding, preventing unauthorized local users on multi-user systems from sending `QUIT` or UI disruption commands.
 - **Private Image Cache & Config Permissions (`0700` / `0600`)**: The image cache directory (`~/.cache/clipon`) is now enforced at `0700` and all cached PNG screenshots and atomic config writes (`config.toml`) are enforced at `0600`, protecting sensitive clipboard screenshots from local information disclosure.
@@ -190,6 +195,9 @@ language = "ja"     # UI表示言語: "ja" (日本語) | "en" (English)
 ---
 
 ### 更新履歴 (Changelog)
+
+#### v1.1.1 — XKB `ctrl:swapcaps`（Ctrl / CapsLock 入れ替え環境）対応修正
+- **自動ペースト時に CapsLock が ON になり生文字 `'v'` が入力される不具合を修正**: OS側で `ctrl:swapcaps` 等の XKB キーマップオプションが有効な環境では、物理スキャンコード `KEY_LEFTCTRL` (evdev 29) が OS のコンポジタによって `Caps_Lock` に変換されるため、`/dev/uinput` からの自動ペースト時に CapsLock が点灯し、修飾なしの `'v'` が打たれる問題がありました。`ActiveModifierMap` により X11/XWayland の実モディファイアマッピング (`GetModifierMapping`) を動的照会し、`Caps_Lock` (`Lock` 修飾) に割り当てられていない有効な物理キー（`KEY_RIGHTCTRL` または `KEY_CAPSLOCK`）へ自動解決するよう修正しました（併せて修飾キー押下〜主キー押下間の同期ディレイを `8 ms` へ最適化）。
 
 #### v1.1.0 — セキュリティ要塞化 ＆ ステートマシン自己治癒アップデート
 - **IPC ソケットの権限制限 (`0600`)**: UNIXドメインソケット（`$XDG_RUNTIME_DIR/clipon.sock` または `/tmp/clipon-<uid>.sock`）のパーミッションをバインド直後に所有者限定 (`0600`) へ厳格化し、マルチユーザー環境における他ユーザーからの不正コマンド送信（`QUIT` や画面表示妨害）をカーネルレベルで遮断。

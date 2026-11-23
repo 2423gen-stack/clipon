@@ -140,6 +140,31 @@ pub fn evdev_keycode_to_trigger_key(code: KeyCode) -> Option<TriggerKey> {
     }
 }
 
+/// X11/XKB のモディファイアマッピング（`ctrl:swapcaps` 等）を考慮して evdev [`KeyCode`] を [`TriggerKey`] へ変換する。
+pub fn evdev_keycode_to_trigger_key_with_map(
+    code: KeyCode,
+    mod_map: Option<&crate::paste::ActiveModifierMap>,
+) -> Option<TriggerKey> {
+    if let Some(map) = mod_map {
+        if map.control.contains(&code) && !map.lock.contains(&code) {
+            return Some(TriggerKey::Control);
+        }
+        if map.lock.contains(&code) {
+            return Some(TriggerKey::Key("capslock".to_string()));
+        }
+        if map.shift.contains(&code) {
+            return Some(TriggerKey::Shift);
+        }
+        if map.alt.contains(&code) {
+            return Some(TriggerKey::Alt);
+        }
+        if map.super_mod.contains(&code) {
+            return Some(TriggerKey::Super);
+        }
+    }
+    evdev_keycode_to_trigger_key(code)
+}
+
 /// X11 キーコードを Linux 標準の `evdev + 8` オフセットで [`TriggerKey`] へ変換する。
 pub fn x11_keycode_to_trigger_key(keycode: u8) -> Option<TriggerKey> {
     let evdev_code = keycode.checked_sub(8)?;
@@ -386,7 +411,18 @@ fn run_evdev_loop(
     started_at: Instant,
     on_trigger: &(dyn Fn() + Send),
 ) {
+    const MOD_MAP_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
+    let mut mod_map = crate::paste::ActiveModifierMap::query_x11();
+    let mut last_map_refresh = Instant::now();
+
     while !stop_flag.load(Ordering::Acquire) && !reload_flag.load(Ordering::Acquire) {
+        if last_map_refresh.elapsed() >= MOD_MAP_REFRESH_INTERVAL {
+            if let Some(fresh) = crate::paste::ActiveModifierMap::query_x11() {
+                mod_map = Some(fresh);
+            }
+            last_map_refresh = Instant::now();
+        }
+
         let mut had_events = false;
         let mut disconnected = Vec::new();
 
@@ -402,7 +438,9 @@ fn run_evdev_loop(
                                 // value == 2 のキーリピート等は無視する
                                 _ => continue,
                             };
-                            if let Some(key) = evdev_keycode_to_trigger_key(code) {
+                            if let Some(key) =
+                                evdev_keycode_to_trigger_key_with_map(code, mod_map.as_ref())
+                            {
                                 dispatch_key_event(shared, key, pressed, started_at, on_trigger);
                             }
                         }
@@ -471,6 +509,17 @@ fn run_x11_fallback_loop(
         return;
     };
 
+    let mod_map = conn
+        .get_modifier_mapping()
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .map(|reply| {
+            crate::paste::ActiveModifierMap::from_x11_reply(
+                reply.keycodes_per_modifier(),
+                &reply.keycodes,
+            )
+        });
+
     let mut prev_keymap = conn
         .query_keymap()
         .ok()
@@ -493,8 +542,11 @@ fn run_x11_fallback_loop(
         prev_keymap = reply.keys;
 
         for (keycode, pressed) in edges {
-            if let Some(key) = x11_keycode_to_trigger_key(keycode) {
-                dispatch_key_event(shared, key, pressed, started_at, on_trigger);
+            if let Some(evdev_code) = keycode.checked_sub(8) {
+                let code = KeyCode::new(u16::from(evdev_code));
+                if let Some(key) = evdev_keycode_to_trigger_key_with_map(code, mod_map.as_ref()) {
+                    dispatch_key_event(shared, key, pressed, started_at, on_trigger);
+                }
             }
         }
 
@@ -535,6 +587,31 @@ mod tests {
         assert_eq!(
             evdev_keycode_to_trigger_key(KeyCode::KEY_F1),
             Some(TriggerKey::Key("f1".to_string()))
+        );
+    }
+
+    #[test]
+    fn evdev_keycode_mapping_with_swapcaps_modifier_map_swaps_ctrl_and_capslock() {
+        let mut table = [0u8; 32];
+        table[4] = 0x25; // Lock = physical Left Ctrl (29)
+        table[8] = 0x42; // Control = physical CapsLock (58)
+        table[9] = 0x69; // Control = physical Right Ctrl (97)
+        let map = crate::paste::ActiveModifierMap::from_x11_reply(4, &table);
+
+        // 物理 CapsLock (58) は Control として認識されること
+        assert_eq!(
+            evdev_keycode_to_trigger_key_with_map(KeyCode::KEY_CAPSLOCK, Some(&map)),
+            Some(TriggerKey::Control)
+        );
+        // 物理 Left Ctrl (29) は capslock として認識されること
+        assert_eq!(
+            evdev_keycode_to_trigger_key_with_map(KeyCode::KEY_LEFTCTRL, Some(&map)),
+            Some(TriggerKey::Key("capslock".to_string()))
+        );
+        // 物理 Right Ctrl (97) は Control として認識されること
+        assert_eq!(
+            evdev_keycode_to_trigger_key_with_map(KeyCode::KEY_RIGHTCTRL, Some(&map)),
+            Some(TriggerKey::Control)
         );
     }
 

@@ -4,9 +4,10 @@ use evdev::uinput::VirtualDevice;
 use evdev::{AttributeSet, EventType, InputEvent, KeyCode};
 use std::process::Command;
 use std::time::Duration;
+use x11rb::protocol::xproto::ConnectionExt as _;
 
 /// 押下と解放の間に挿入する待機時間（ミリ秒）。
-const KEY_PRESS_HOLD_MS: u64 = 5;
+const KEY_PRESS_HOLD_MS: u64 = 8;
 
 /// 通常キーの正規化名・evdev キーコード・xdotool 表記の対応表。
 const MAIN_KEY_TABLE: &[(&str, KeyCode, &str)] = &[
@@ -64,12 +65,17 @@ const MAIN_KEY_TABLE: &[(&str, KeyCode, &str)] = &[
     ("f12", KeyCode::KEY_F12, "F12"),
 ];
 
-/// 修飾キーの evdev キーコード一覧。
+/// 仮想キーボードに登録する修飾キーの evdev キーコード一覧（`ctrl:swapcaps` 等にも対応するため左右および CapsLock を網羅）。
 const MODIFIER_KEY_CODES: &[KeyCode] = &[
     KeyCode::KEY_LEFTCTRL,
+    KeyCode::KEY_RIGHTCTRL,
+    KeyCode::KEY_CAPSLOCK,
     KeyCode::KEY_LEFTSHIFT,
+    KeyCode::KEY_RIGHTSHIFT,
     KeyCode::KEY_LEFTALT,
+    KeyCode::KEY_RIGHTALT,
     KeyCode::KEY_LEFTMETA,
+    KeyCode::KEY_RIGHTMETA,
 ];
 
 /// パース済みのペーストショートカット表現。
@@ -79,6 +85,144 @@ pub struct PasteShortcut {
     pub modifiers: Vec<KeyCode>,
     /// 主キー。
     pub key: KeyCode,
+}
+
+/// X11 (`GetModifierMapping`) から取得した各修飾子の有効な物理 evdev キーコード表。
+///
+/// `ctrl:swapcaps` 等の XKB オプションが有効な環境では、物理 `KEY_LEFTCTRL` (evdev 29) が
+/// `Caps_Lock` (Lock 修飾) に割り当てられるため、実際のモディファイアマッピングを参照して
+/// CapsLock にならない安全な物理キー（`KEY_RIGHTCTRL` や `KEY_CAPSLOCK`）へ解決する。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ActiveModifierMap {
+    /// Shift (mod index 0) に割り当てられている evdev キーコード群。
+    pub shift: Vec<KeyCode>,
+    /// Lock / CapsLock (mod index 1) に割り当てられている evdev キーコード群。
+    pub lock: Vec<KeyCode>,
+    /// Control (mod index 2) に割り当てられている evdev キーコード群。
+    pub control: Vec<KeyCode>,
+    /// Alt / Mod1 (mod index 3) に割り当てられている evdev キーコード群。
+    pub alt: Vec<KeyCode>,
+    /// Super / Mod4 (mod index 6) に割り当てられている evdev キーコード群。
+    pub super_mod: Vec<KeyCode>,
+}
+
+impl ActiveModifierMap {
+    /// X11 `GetModifierMapping` の応答データ（1修飾子あたりのキーコード数および全8行の配列）から構築する。
+    pub fn from_x11_reply(keycodes_per_modifier: u8, keycodes: &[u8]) -> Self {
+        let k = usize::from(keycodes_per_modifier);
+        if k == 0 || keycodes.len() < 8 * k {
+            return Self::default();
+        }
+        let extract_row = |row: usize| -> Vec<KeyCode> {
+            let start = row * k;
+            let end = start + k;
+            keycodes[start..end]
+                .iter()
+                .copied()
+                .filter(|&x11_kc| x11_kc >= 8)
+                .map(|x11_kc| KeyCode::new(u16::from(x11_kc - 8)))
+                .collect()
+        };
+
+        Self {
+            shift: extract_row(0),
+            lock: extract_row(1),
+            control: extract_row(2),
+            alt: extract_row(3),
+            super_mod: extract_row(6),
+        }
+    }
+
+    /// 稼働中の X11 / XWayland サーバーから現在のモディファイアマッピングを取得する。
+    pub fn query_x11() -> Option<Self> {
+        let (conn, _) = x11rb::connect(None).ok()?;
+        let reply = conn.get_modifier_mapping().ok()?.reply().ok()?;
+        Some(Self::from_x11_reply(
+            reply.keycodes_per_modifier(),
+            &reply.keycodes,
+        ))
+    }
+
+    /// 論理的な修飾キーに対して、Lock (`Caps_Lock`) を絶対に踏まない有効な物理 evdev [`KeyCode`] を返す。
+    pub fn resolve_modifier(&self, logical_mod: KeyCode) -> KeyCode {
+        match logical_mod {
+            KeyCode::KEY_LEFTCTRL | KeyCode::KEY_RIGHTCTRL | KeyCode::KEY_CAPSLOCK => {
+                // ctrl:swapcaps / ctrl:nocaps / ctrl:lctrl_meta 等の影響を最も受けにくい
+                // KEY_RIGHTCTRL を第1候補とし、X11 マッピングと照合して Lock 以外のキーを選ぶ。
+                let candidates = [
+                    KeyCode::KEY_RIGHTCTRL,
+                    KeyCode::KEY_LEFTCTRL,
+                    KeyCode::KEY_CAPSLOCK,
+                ];
+                if !self.control.is_empty() {
+                    for &cand in &candidates {
+                        if self.control.contains(&cand) && !self.lock.contains(&cand) {
+                            return cand;
+                        }
+                    }
+                    for &mapped in &self.control {
+                        if MODIFIER_KEY_CODES.contains(&mapped) && !self.lock.contains(&mapped) {
+                            return mapped;
+                        }
+                    }
+                }
+                if !self.lock.contains(&KeyCode::KEY_RIGHTCTRL) {
+                    KeyCode::KEY_RIGHTCTRL
+                } else {
+                    KeyCode::KEY_CAPSLOCK
+                }
+            }
+            KeyCode::KEY_LEFTSHIFT | KeyCode::KEY_RIGHTSHIFT => {
+                let candidates = [KeyCode::KEY_LEFTSHIFT, KeyCode::KEY_RIGHTSHIFT];
+                if !self.shift.is_empty() {
+                    for &cand in &candidates {
+                        if self.shift.contains(&cand) && !self.lock.contains(&cand) {
+                            return cand;
+                        }
+                    }
+                }
+                KeyCode::KEY_LEFTSHIFT
+            }
+            KeyCode::KEY_LEFTALT | KeyCode::KEY_RIGHTALT => {
+                let candidates = [KeyCode::KEY_LEFTALT, KeyCode::KEY_RIGHTALT];
+                if !self.alt.is_empty() {
+                    for &cand in &candidates {
+                        if self.alt.contains(&cand) && !self.lock.contains(&cand) {
+                            return cand;
+                        }
+                    }
+                }
+                KeyCode::KEY_LEFTALT
+            }
+            KeyCode::KEY_LEFTMETA | KeyCode::KEY_RIGHTMETA => {
+                let candidates = [KeyCode::KEY_LEFTMETA, KeyCode::KEY_RIGHTMETA];
+                if !self.super_mod.is_empty() {
+                    for &cand in &candidates {
+                        if self.super_mod.contains(&cand) && !self.lock.contains(&cand) {
+                            return cand;
+                        }
+                    }
+                }
+                KeyCode::KEY_LEFTMETA
+            }
+            other => other,
+        }
+    }
+
+    /// [`PasteShortcut`] 内の全修飾キーを現在のキーマップで安全な物理 [`KeyCode`] へ変換する。
+    pub fn resolve_shortcut(&self, shortcut: &PasteShortcut) -> PasteShortcut {
+        let mut modifiers = Vec::with_capacity(shortcut.modifiers.len());
+        for &m in &shortcut.modifiers {
+            let resolved = self.resolve_modifier(m);
+            if !modifiers.contains(&resolved) {
+                modifiers.push(resolved);
+            }
+        }
+        PasteShortcut {
+            modifiers,
+            key: shortcut.key,
+        }
+    }
 }
 
 /// 修飾キー文字列を [`KeyCode`] へ変換する。
@@ -107,7 +251,9 @@ fn parse_main_key(raw: &str) -> Option<KeyCode> {
 /// [`KeyCode`] を `xdotool` 用の修飾キー表記または主キー表記へ変換する。
 fn keycode_to_xdotool(code: KeyCode) -> String {
     match code {
-        KeyCode::KEY_LEFTCTRL | KeyCode::KEY_RIGHTCTRL => "ctrl".to_string(),
+        KeyCode::KEY_LEFTCTRL | KeyCode::KEY_RIGHTCTRL | KeyCode::KEY_CAPSLOCK => {
+            "ctrl".to_string()
+        }
         KeyCode::KEY_LEFTSHIFT | KeyCode::KEY_RIGHTSHIFT => "shift".to_string(),
         KeyCode::KEY_LEFTALT | KeyCode::KEY_RIGHTALT => "alt".to_string(),
         KeyCode::KEY_LEFTMETA | KeyCode::KEY_RIGHTMETA => "super".to_string(),
@@ -188,7 +334,9 @@ impl AutoPaster {
     pub fn send_paste(&mut self, key_spec: &str) -> Result<(), String> {
         let shortcut = parse_paste_shortcut(key_spec)?;
         if let Some(dev) = self.device.as_mut() {
-            emit_shortcut_via_uinput(dev, &shortcut)
+            let mod_map = ActiveModifierMap::query_x11().unwrap_or_default();
+            let resolved = mod_map.resolve_shortcut(&shortcut);
+            emit_shortcut_via_uinput(dev, &resolved)
         } else {
             send_shortcut_via_xdotool(&shortcut)
         }
@@ -235,6 +383,7 @@ fn emit_shortcut_via_uinput(
             .collect();
         dev.emit(&mod_downs)
             .map_err(|e| format!("uinput 修飾キー押下送出に失敗しました: {e}"))?;
+        std::thread::sleep(Duration::from_millis(KEY_PRESS_HOLD_MS));
     }
 
     dev.emit(&[key_event(shortcut.key, 1)])
@@ -246,6 +395,7 @@ fn emit_shortcut_via_uinput(
         .map_err(|e| format!("uinput 主キー解放送出に失敗しました: {e}"))?;
 
     if !shortcut.modifiers.is_empty() {
+        std::thread::sleep(Duration::from_millis(KEY_PRESS_HOLD_MS));
         let mod_ups: Vec<InputEvent> = shortcut
             .modifiers
             .iter()
@@ -324,5 +474,66 @@ mod tests {
         assert_eq!(control_0.modifiers, vec![KeyCode::KEY_LEFTCTRL]);
         assert_eq!(control_0.key, KeyCode::KEY_0);
         assert_eq!(format_xdotool_key(&control_0), "ctrl+0");
+    }
+
+    #[test]
+    fn x11_modifier_map_resolves_ctrl_swapcaps_without_hitting_capslock() {
+        // ctrl:swapcaps 環境の X11 GetModifierMapping (keycodes_per_modifier = 4) を再現:
+        // row 0 (Shift):   0x32 (LEFTSHIFT=42), 0x3e (RIGHTSHIFT=54)
+        // row 1 (Lock):    0x25 (LEFTCTRL=29 -> Caps_Lock にスワップされている!)
+        // row 2 (Control): 0x42 (CAPSLOCK=58 -> Control_L), 0x69 (RIGHTCTRL=97 -> Control_R)
+        // row 3 (Mod1):    0x40 (LEFTALT=56), 0x6c (RIGHTALT=100)
+        // row 6 (Mod4):    0x85 (LEFTMETA=125), 0x86 (RIGHTMETA=126)
+        let mut table = [0u8; 32];
+        table[0] = 0x32;
+        table[1] = 0x3e;
+        table[4] = 0x25; // Lock = physical Left Ctrl!
+        table[8] = 0x42; // Control = physical CapsLock
+        table[9] = 0x69; // Control = physical Right Ctrl
+        table[12] = 0x40;
+        table[13] = 0x6c;
+        table[24] = 0x85;
+        table[25] = 0x86;
+
+        let map = ActiveModifierMap::from_x11_reply(4, &table);
+        assert_eq!(map.lock, vec![KeyCode::KEY_LEFTCTRL]);
+        assert_eq!(
+            map.control,
+            vec![KeyCode::KEY_CAPSLOCK, KeyCode::KEY_RIGHTCTRL]
+        );
+
+        let shortcut = parse_paste_shortcut("Ctrl+v").expect("Ctrl+v パース成功");
+        let resolved = map.resolve_shortcut(&shortcut);
+
+        // KEY_LEFTCTRL は Lock (Caps_Lock) に割り当てられているため絶対に送出してはならず、
+        // Control に割り当てられている KEY_RIGHTCTRL が選択されること
+        assert_eq!(resolved.modifiers, vec![KeyCode::KEY_RIGHTCTRL]);
+        assert!(!resolved.modifiers.contains(&KeyCode::KEY_LEFTCTRL));
+        assert_eq!(resolved.key, KeyCode::KEY_V);
+    }
+
+    #[test]
+    fn x11_modifier_map_resolves_when_only_capslock_is_control() {
+        // 左右 Ctrl とも別キーへ潰され、物理 CapsLock (0x42 -> evdev 58) のみが Control の環境
+        let mut table = [0u8; 32];
+        table[4] = 0x25; // Lock = physical Left Ctrl
+        table[8] = 0x42; // Control = physical CapsLock のみ
+
+        let map = ActiveModifierMap::from_x11_reply(4, &table);
+        let shortcut = parse_paste_shortcut("Ctrl+v").expect("Ctrl+v パース成功");
+        let resolved = map.resolve_shortcut(&shortcut);
+
+        assert_eq!(resolved.modifiers, vec![KeyCode::KEY_CAPSLOCK]);
+    }
+
+    #[test]
+    fn default_empty_modifier_map_uses_rightctrl_to_avoid_swapcaps() {
+        // X11 マッピング未取得時のフォールバックでも、ctrl:swapcaps で CapsLock 化される
+        // KEY_LEFTCTRL を避けて KEY_RIGHTCTRL へ解決されること
+        let map = ActiveModifierMap::default();
+        let shortcut = parse_paste_shortcut("Ctrl+v").expect("Ctrl+v パース成功");
+        let resolved = map.resolve_shortcut(&shortcut);
+
+        assert_eq!(resolved.modifiers, vec![KeyCode::KEY_RIGHTCTRL]);
     }
 }
