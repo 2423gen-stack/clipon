@@ -1,0 +1,29 @@
+[Desktop Entry]
+Type=Application
+Name=ClipOn
+GenericName=Clipboard Manager
+GenericName[ja]=クリップボードマネージャー
+Comment=Ultra-Lightweight Linux Clipboard Launcher in Pure Rust
+Comment[ja]=純Rust製・超軽量クリップボードランチャー
+Exec=/home/gen/.local/bin/clipon --toggle
+Icon=clipon
+Terminal=false
+Categories=Utility;
+Keywords=clipboard;launcher;clibor;history;
+StartupNotify=false
+Actions=Toggle;Settings;Quit;
+
+[Desktop Action Toggle]
+Name=Show/Hide History
+Name[ja]=履歴の表示・非表示
+Exec=/home/gen/.local/bin/clipon --toggle
+
+[Desktop Action Settings]
+Name=Settings
+Name[ja]=設定
+Exec=/home/gen/.local/bin/clipon --settings
+
+[Desktop Action Quit]
+Name=Quit ClipOn
+Name[ja]=ClipOn を終了
+Exec=/home/gen/.local/bin/clipon --quit
