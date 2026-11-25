@@ -218,6 +218,11 @@ impl AppConfig {
         xdg_config_dir().join("clipon").join("config.toml")
     }
 
+    /// デフォルトの定型句（ピン留め履歴）保存ファイルパス（`~/.config/clipon/pinned.toml`）を返す。
+    pub fn default_pinned_path() -> PathBuf {
+        xdg_config_dir().join("clipon").join("pinned.toml")
+    }
+
     /// デフォルトのキャッシュディレクトリパス（`~/.cache/clipon`）を返す。
     pub fn default_cache_dir() -> PathBuf {
         xdg_cache_dir().join("clipon")

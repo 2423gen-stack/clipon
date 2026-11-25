@@ -120,6 +120,7 @@ fn run_daemon(
     initial_ui_cmd: Option<UiCommand>,
 ) -> Result<(), String> {
     let config_path = AppConfig::default_config_path();
+    let pinned_path = AppConfig::default_pinned_path();
     let cache_dir = AppConfig::default_cache_dir();
     let config = match AppConfig::load_from_path(&config_path) {
         Ok(cfg) => cfg,
@@ -129,7 +130,11 @@ fn run_daemon(
         }
     };
 
-    let history = Arc::new(Mutex::new(HistoryStore::new(config.history.max_items)));
+    let mut initial_store = HistoryStore::new(config.history.max_items);
+    if let Err(err) = initial_store.load_pinned_from_path(&pinned_path, &cache_dir) {
+        eprintln!("ClipOn 警告: 定型句ファイルの読込に失敗しました（継続します）: {err}");
+    }
+    let history = Arc::new(Mutex::new(initial_store));
     let (ui_tx, ui_rx) = mpsc::channel::<UiCommand>();
     let (ctx_tx, ctx_rx) = mpsc::channel::<egui::Context>();
     let ctx_slot = Arc::new(Mutex::new(None));
@@ -200,6 +205,7 @@ fn run_daemon(
     let shared = Arc::new(AppState {
         config: Mutex::new(config),
         config_path,
+        pinned_path,
         cache_dir,
         history,
         clipboard,

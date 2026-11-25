@@ -34,15 +34,15 @@ pub fn tr(lang: UiLanguage, ja: &'static str, en: &'static str) -> &'static str 
 /// ポップアップウィンドウの固定幅（論理ピクセル）。
 const POPUP_WIDTH: f32 = 420.0;
 /// ポップアップウィンドウの最小高さ（論理ピクセル）。
-const POPUP_MIN_HEIGHT: f32 = 108.0;
+const POPUP_MIN_HEIGHT: f32 = 136.0;
 /// ポップアップウィンドウの最大高さ（論理ピクセル）。
 const POPUP_MAX_HEIGHT: f32 = 460.0;
 /// テキスト・ファイル行の推定高さ（論理ピクセル）。
 const TEXT_ROW_HEIGHT: f32 = 28.0;
 /// 画像行の推定高さ（論理ピクセル）。
 const IMAGE_ROW_HEIGHT: f32 = 42.0;
-/// ポップアップ上下余白およびフッター領域の高さ（論理ピクセル）。
-const POPUP_CHROME_HEIGHT: f32 = 52.0;
+/// ポップアップ上下余白・タブヘッダー・フッター領域の高さ（論理ピクセル）。
+const POPUP_CHROME_HEIGHT: f32 = 82.0;
 
 /// 設定ウィンドウの幅・高さ（論理ピクセル）。
 const SETTINGS_SIZE: (f32, f32) = (480.0, 480.0);
@@ -83,12 +83,33 @@ pub enum UiMode {
     Settings,
 }
 
+/// ポップアップ画面のアクティブタブ（`←` で普通履歴、`→` で定型句）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PopupTab {
+    /// 通常のクリップボード履歴タブ。
+    #[default]
+    History,
+    /// 📌 ピン留めされた定型句タブ。
+    Pinned,
+}
+
+/// `←` / `→` キー入力に応じて切り替え後の `PopupTab` を返す。
+pub fn switch_popup_tab_on_arrow(current: PopupTab, key: egui::Key) -> Option<PopupTab> {
+    match key {
+        egui::Key::ArrowLeft if current != PopupTab::History => Some(PopupTab::History),
+        egui::Key::ArrowRight if current != PopupTab::Pinned => Some(PopupTab::Pinned),
+        _ => None,
+    }
+}
+
 /// GUI とバックグラウンドワーカー間で共有するアプリケーション状態。
 pub struct AppState {
     /// 現在のアプリケーション設定。
     pub config: Mutex<AppConfig>,
     /// 設定ファイル (`config.toml`) の保存先パス。
     pub config_path: PathBuf,
+    /// 定型句ファイル (`pinned.toml`) の保存先パス。
+    pub pinned_path: PathBuf,
     /// 画像一時保存キャッシュディレクトリ。
     pub cache_dir: PathBuf,
     /// クリップボード履歴ストア。
@@ -512,8 +533,11 @@ struct ClipOnApp {
     shared: Arc<AppState>,
     ui_rx: Receiver<UiCommand>,
     mode: UiMode,
+    popup_tab: PopupTab,
     allow_exit: bool,
     cached_items: Vec<ClipItem>,
+    cached_pinned_items: Vec<ClipItem>,
+    pinned_hashes: HashSet<u64>,
     selected_index: usize,
     scroll_to_selection: bool,
     opened_at: Option<Instant>,
@@ -536,8 +560,11 @@ impl ClipOnApp {
             shared,
             ui_rx,
             mode: UiMode::Hidden,
+            popup_tab: PopupTab::History,
             allow_exit: false,
             cached_items: Vec::new(),
+            cached_pinned_items: Vec::new(),
+            pinned_hashes: HashSet::new(),
             selected_index: 0,
             scroll_to_selection: false,
             opened_at: None,
@@ -549,18 +576,64 @@ impl ClipOnApp {
         }
     }
 
+    /// 現在アクティブなタブの表示アイテム一覧スライスを返す。
+    fn active_tab_items(&self) -> &[ClipItem] {
+        match self.popup_tab {
+            PopupTab::History => &self.cached_items,
+            PopupTab::Pinned => &self.cached_pinned_items,
+        }
+    }
+
+    /// ポップアップのアクティブタブを切り替え、選択インデックスを先頭へリセットしてウィンドウ高さを調整する。
+    fn switch_popup_tab(&mut self, ctx: &egui::Context, new_tab: PopupTab) {
+        if self.popup_tab == new_tab {
+            return;
+        }
+        self.popup_tab = new_tab;
+        self.selected_index = 0;
+        self.scroll_to_selection = true;
+        let win_height =
+            compute_popup_height(&self.cached_items).max(compute_popup_height(&self.cached_pinned_items));
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+            POPUP_WIDTH,
+            win_height,
+        )));
+    }
+
+    /// 指定アイテムのピン留め（定型句登録／解除）をトグルし、`pinned.toml` へ即時保存する。
+    fn toggle_item_pin(&mut self, item: &ClipItem) {
+        if let Ok(mut guard) = self.shared.history.lock() {
+            guard.toggle_pin(item.content.clone());
+            if let Err(err) =
+                guard.save_pinned_to_path(&self.shared.pinned_path, &self.shared.cache_dir)
+            {
+                eprintln!("ClipOn 警告: 定型句の保存に失敗しました: {err}");
+            }
+        }
+        self.refresh_history_snapshot();
+    }
+
     /// 履歴ストアから最新スナップショットを取得し、不要なサムネイルキャッシュを解放する。
     fn refresh_history_snapshot(&mut self) {
         if let Ok(guard) = self.shared.history.lock() {
             self.cached_items = guard.items().to_vec();
+            self.cached_pinned_items = guard.pinned_items().to_vec();
         }
-        if self.cached_items.is_empty() {
+        self.pinned_hashes = self.cached_pinned_items.iter().map(|i| i.hash).collect();
+
+        let active_len = self.active_tab_items().len();
+        if active_len == 0 {
             self.selected_index = 0;
-        } else if self.selected_index >= self.cached_items.len() {
-            self.selected_index = self.cached_items.len() - 1;
+        } else if self.selected_index >= active_len {
+            self.selected_index = active_len - 1;
         }
 
-        let live_hashes: HashSet<u64> = self.cached_items.iter().map(|item| item.hash).collect();
+        let live_hashes: HashSet<u64> = self
+            .cached_items
+            .iter()
+            .chain(self.cached_pinned_items.iter())
+            .map(|item| item.hash)
+            .collect();
         self.thumbnails.retain(|hash, _| live_hashes.contains(hash));
         self.failed_thumbnails
             .retain(|hash| live_hashes.contains(hash));
@@ -628,13 +701,15 @@ impl ClipOnApp {
     fn open_popup(&mut self, ctx: &egui::Context, anchor: Option<(i32, i32)>) {
         self.stop_capture_if_active();
         self.settings = None;
+        self.popup_tab = PopupTab::History;
         self.refresh_history_snapshot();
         self.selected_index = 0;
         self.scroll_to_selection = false;
         self.mode = UiMode::Popup;
         self.opened_at = Some(Instant::now());
 
-        let win_height = compute_popup_height(&self.cached_items);
+        let win_height =
+            compute_popup_height(&self.cached_items).max(compute_popup_height(&self.cached_pinned_items));
         let win_size = (POPUP_WIDTH, win_height);
 
         let ppp = ctx.pixels_per_point().max(0.5);
@@ -741,9 +816,9 @@ impl ClipOnApp {
         }
     }
 
-    /// 選択された履歴エントリをクリップボードへ転送し、即座にポップアップを閉じて自動貼り付けする。
+    /// 選択された履歴または定型句エントリをクリップボードへ転送し、即座にポップアップを閉じて自動貼り付けする。
     fn confirm_selection(&mut self, ctx: &egui::Context, index: usize) {
-        let Some(chosen) = self.cached_items.get(index).cloned() else {
+        let Some(chosen) = self.active_tab_items().get(index).cloned() else {
             self.hide_window(ctx);
             return;
         };
@@ -751,9 +826,11 @@ impl ClipOnApp {
         // フォーカス復帰と視認レスポンス最優先のため即座に非表示化する。
         self.hide_window(ctx);
 
-        if let Ok(mut history) = self.shared.history.lock() {
-            if let Some(pos) = history.items().iter().position(|item| item.id == chosen.id) {
-                history.promote_to_front(pos);
+        if self.popup_tab == PopupTab::History {
+            if let Ok(mut history) = self.shared.history.lock() {
+                if let Some(pos) = history.items().iter().position(|item| item.id == chosen.id) {
+                    history.promote_to_front(pos);
+                }
             }
         }
 
@@ -792,7 +869,8 @@ impl ClipOnApp {
     fn handle_popup_input(&mut self, ctx: &egui::Context) -> Option<usize> {
         let mut close_requested = false;
         let mut confirmed_index: Option<usize> = None;
-        let len = self.cached_items.len();
+        let mut switched_tab: Option<PopupTab> = None;
+        let len = self.active_tab_items().len();
 
         ctx.input(|i| {
             for event in &i.events {
@@ -804,6 +882,10 @@ impl ClipOnApp {
                     ..
                 } = event
                 {
+                    if let Some(target_tab) = switch_popup_tab_on_arrow(self.popup_tab, *key) {
+                        switched_tab = Some(target_tab);
+                        return;
+                    }
                     match key {
                         egui::Key::Escape => {
                             close_requested = true;
@@ -839,6 +921,10 @@ impl ClipOnApp {
             }
         });
 
+        if let Some(tab) = switched_tab {
+            self.switch_popup_tab(ctx, tab);
+            return None;
+        }
         if close_requested {
             self.hide_window(ctx);
             return None;
@@ -921,10 +1007,16 @@ impl ClipOnApp {
             .map(|cfg| cfg.ui.language)
             .unwrap_or(UiLanguage::Ja);
         let mut clicked_index: Option<usize> = None;
+        let mut pin_toggled_item: Option<ClipItem> = None;
+        let mut requested_tab: Option<PopupTab> = None;
         let mut open_settings_clicked = false;
         let mut close_clicked = false;
         let mut start_window_drag = false;
-        let items = self.cached_items.clone();
+        let current_tab = self.popup_tab;
+        let items = self.active_tab_items().to_vec();
+        let history_count = self.cached_items.len();
+        let pinned_count = self.cached_pinned_items.len();
+        let pinned_hashes = self.pinned_hashes.clone();
         let selected_index = self.selected_index;
         let scroll_to_selection = self.scroll_to_selection;
         self.scroll_to_selection = false;
@@ -939,16 +1031,49 @@ impl ClipOnApp {
         egui::CentralPanel::default()
             .frame(panel_frame)
             .show(ctx, |ui| {
+                // 上部タブバー（← 履歴 / → 📌 定型句）
+                ui.horizontal(|ui| {
+                    let hist_label = match lang {
+                        UiLanguage::Ja => format!("← 📋 履歴 ({history_count})"),
+                        UiLanguage::En => format!("← 📋 History ({history_count})"),
+                    };
+                    if ui
+                        .selectable_label(current_tab == PopupTab::History, hist_label)
+                        .clicked()
+                    {
+                        requested_tab = Some(PopupTab::History);
+                    }
+
+                    let pin_label = match lang {
+                        UiLanguage::Ja => format!("📌 定型句 ({pinned_count}) →"),
+                        UiLanguage::En => format!("📌 Pinned ({pinned_count}) →"),
+                    };
+                    if ui
+                        .selectable_label(current_tab == PopupTab::Pinned, pin_label)
+                        .clicked()
+                    {
+                        requested_tab = Some(PopupTab::Pinned);
+                    }
+                });
+                ui.separator();
+
                 if items.is_empty() {
                     ui.vertical_centered(|ui| {
                         ui.add_space(16.0);
-                        ui.label(
-                            egui::RichText::new(tr(
+                        let empty_msg = match current_tab {
+                            PopupTab::History => tr(
                                 lang,
                                 "クリップボード履歴はまだありません",
                                 "No clipboard history yet",
-                            ))
-                            .color(ui.visuals().weak_text_color()),
+                            ),
+                            PopupTab::Pinned => tr(
+                                lang,
+                                "📌 定型句はまだありません（履歴の📌で固定）",
+                                "No pinned items yet (click 📌 in History to pin)",
+                            ),
+                        };
+                        ui.label(
+                            egui::RichText::new(empty_msg).color(ui.visuals().weak_text_color()),
                         );
                         ui.add_space(16.0);
                     });
@@ -961,10 +1086,12 @@ impl ClipOnApp {
                         .show(ui, |ui| {
                             for (idx, item) in items.iter().enumerate() {
                                 let is_selected = idx == selected_index;
+                                let is_pinned = pinned_hashes.contains(&item.hash);
                                 let badge = shortcut_char_for_index(idx)
                                     .map(|c| format!("[{c}]"))
                                     .unwrap_or_else(|| " · ".to_string());
 
+                                let mut row_pin_clicked = false;
                                 let mut prepared = egui::Frame::NONE
                                     .corner_radius(4.0)
                                     .inner_margin(egui::Margin::symmetric(6, 4))
@@ -973,6 +1100,32 @@ impl ClipOnApp {
                                     let row_ui = &mut prepared.content_ui;
                                     row_ui.set_min_width(row_ui.available_width());
                                     row_ui.horizontal(|ui| {
+                                        let pin_color = if is_pinned {
+                                            egui::Color32::from_rgb(250, 204, 21)
+                                        } else {
+                                            ui.visuals()
+                                                .weak_text_color()
+                                                .gamma_multiply(0.45)
+                                        };
+                                        let pin_tooltip = if is_pinned {
+                                            tr(lang, "定型句の固定を解除", "Unpin from templates")
+                                        } else {
+                                            tr(lang, "定型句として固定 (→キーで表示)", "Pin as template (view with →)")
+                                        };
+                                        let pin_btn = ui
+                                            .add(
+                                                egui::Button::new(
+                                                    egui::RichText::new("📌")
+                                                        .small()
+                                                        .color(pin_color),
+                                                )
+                                                .frame(false),
+                                            )
+                                            .on_hover_text(pin_tooltip);
+                                        if pin_btn.clicked() {
+                                            row_pin_clicked = true;
+                                        }
+
                                         ui.label(
                                             egui::RichText::new(&badge)
                                                 .monospace()
@@ -997,7 +1150,7 @@ impl ClipOnApp {
                                             }
                                         }
 
-                                        let label_text = item.display_label_for_lang(52, lang);
+                                        let label_text = item.display_label_for_lang(46, lang);
                                         ui.add(
                                             egui::Label::new(label_text)
                                                 .truncate()
@@ -1018,7 +1171,9 @@ impl ClipOnApp {
                                 if is_selected && scroll_to_selection {
                                     row_resp.scroll_to_me(Some(egui::Align::Center));
                                 }
-                                if row_resp.clicked() {
+                                if row_pin_clicked {
+                                    pin_toggled_item = Some(item.clone());
+                                } else if row_resp.clicked() {
                                     clicked_index = Some(idx);
                                 }
                             }
@@ -1031,8 +1186,8 @@ impl ClipOnApp {
                         egui::Label::new(
                             egui::RichText::new(tr(
                                 lang,
-                                "↑↓+Enter / 1-9,a-z で貼付",
-                                "↑↓+Enter / 1-9,a-z to paste",
+                                "←→:タブ / ↑↓+Enter / 1-9,a-z で貼付",
+                                "←→:Tab / ↑↓+Enter / 1-9,a-z to paste",
                             ))
                             .small()
                             .color(ui.visuals().weak_text_color()),
@@ -1063,7 +1218,11 @@ impl ClipOnApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
         }
 
-        if close_clicked {
+        if let Some(tab) = requested_tab {
+            self.switch_popup_tab(ctx, tab);
+        } else if let Some(item) = pin_toggled_item {
+            self.toggle_item_pin(&item);
+        } else if close_clicked {
             self.hide_window(ctx);
         } else if open_settings_clicked {
             self.open_settings(ctx);
@@ -1751,6 +1910,34 @@ mod tests {
         assert_eq!(
             tr(UiLanguage::En, "保存して閉じる", "Save & Close"),
             "Save & Close"
+        );
+    }
+
+    #[test]
+    fn switch_popup_tab_on_arrow_switches_between_history_and_pinned() {
+        // 普通履歴タブで → キーを押すと定型句タブへ遷移
+        assert_eq!(
+            switch_popup_tab_on_arrow(PopupTab::History, egui::Key::ArrowRight),
+            Some(PopupTab::Pinned)
+        );
+        // 普通履歴タブで ← キーを押しても変化なし
+        assert_eq!(
+            switch_popup_tab_on_arrow(PopupTab::History, egui::Key::ArrowLeft),
+            None
+        );
+        // 定型句タブで ← キーを押すと普通履歴タブへ遷移
+        assert_eq!(
+            switch_popup_tab_on_arrow(PopupTab::Pinned, egui::Key::ArrowLeft),
+            Some(PopupTab::History)
+        );
+        // 定型句タブで → キーや上下キーを押しても変化なし
+        assert_eq!(
+            switch_popup_tab_on_arrow(PopupTab::Pinned, egui::Key::ArrowRight),
+            None
+        );
+        assert_eq!(
+            switch_popup_tab_on_arrow(PopupTab::History, egui::Key::ArrowDown),
+            None
         );
     }
 }

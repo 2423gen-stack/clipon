@@ -24,17 +24,18 @@
 ### Key Features
 
 1. **Double-Tap Key Trigger**: Double-tap `Shift` (or `Ctrl`, `Alt`, `Super`, or any custom key/combo) to summon the history popup in sub-milliseconds. Built-in anti-misfire state machine ignores modifier holds during normal typing (e.g., typing capital letters).
-2. **Instant Keyboard Selection**:
-   - Navigate with `↑` / `↓` + `Enter`, or
-   - Press a single shortcut key (`1`–`9`, `a`–`z`) to select and paste immediately.
-3. **Auto-Paste to Active Window**: Uses a persistent `/dev/uinput` kernel virtual keyboard (with `xdotool` fallback) to send `Ctrl+v` (configurable: `Ctrl+Shift+v`, `Shift+Insert`, etc.) directly to your previous window.
-4. **Text, Files & Images**:
+2. **Instant Keyboard Selection & `←` / `→` Tab Switching**:
+   - Navigate with `↑` / `↓` + `Enter`, or press a single shortcut key (`1`–`9`, `a`–`z`) to select and paste immediately.
+   - Switch between **📋 History** and **📌 Pinned (Templates)** instantaneously with the `←` and `→` arrow keys.
+3. **📌 Pinned Templates (Persistent Snippets)**: Click the `📌` icon on any history item (text, file paths, or image) to pin it as a permanent template. Pinned items never expire from the ring buffer and are automatically persisted across reboots in `~/.config/clipon/pinned.toml` (`0600`).
+4. **Auto-Paste to Active Window**: Uses a persistent `/dev/uinput` kernel virtual keyboard (with `xdotool` fallback) to send `Ctrl+v` (configurable: `Ctrl+Shift+v`, `Shift+Insert`, etc.) directly to your previous window.
+5. **Text, Files & Images**:
    - **Text**: Single-line preview with newline markers (`↵`).
    - **Files (`📄 filename`)**: Paste either the absolute file path string (`path` mode) or file URI object (`file` mode).
    - **Images (`🖼️ [Image WxH]`)**: Live thumbnail preview; paste raw PNG image data (`image` mode) or a cached local PNG file path (`path` mode).
-5. **Remembers Popup Position**: Move the popup anywhere by dragging the bottom hint bar or using `Super + Left Mouse Drag`; ClipOn automatically remembers and persists the exact client position to `config.toml` when closed.
-6. **System Tray & Autostart**: Top-bar `StatusNotifierItem` (AppIndicator) tray icon with **Show / Settings / Quit**, plus a 1-click checkbox for Ubuntu login autostart (`~/.config/autostart/clipon.desktop`).
-7. **Bilingual GUI (`日本語` / `English`)**: Switch the UI language live from the Settings window (`🌐 日本語 / English`).
+6. **Remembers Popup Position**: Move the popup anywhere by dragging the bottom hint bar or using `Super + Left Mouse Drag`; ClipOn automatically remembers and persists the exact client position to `config.toml` when closed.
+7. **System Tray, Desktop Launcher & Autostart**: Top-bar `StatusNotifierItem` (AppIndicator) tray icon, GNOME desktop application entry (`clipon.desktop`), plus a 1-click checkbox for Ubuntu login autostart (`~/.config/autostart/clipon.desktop`).
+8. **Bilingual GUI (`日本語` / `English`)**: Switch the UI language live from the Settings window (`🌐 日本語 / English`).
 
 ---
 
@@ -108,6 +109,12 @@ clipon --help       Print CLI help
 
 ### Changelog
 
+#### v1.2.0 — 📌 Pinned Templates Tab & `←` / `→` Arrow Tab Switching
+- **📌 Pin Any History Item as a Template**: Added a `📌` button to each row in the popup. Clicking `📌` pins (or unpins) the item into the **📌 Pinned (定型句)** tab so frequently used snippets, paths, or images are permanently protected from rolling out of the history buffer.
+- **Instant `←` / `→` Keyboard Tab Navigation**: Press `→` in the popup to switch to the **📌 Pinned** tab, and press `←` to return to **📋 History** (or click the tab headers directly). All single-key shortcuts (`1`–`9`, `a`–`z`) and `↑` / `↓` + `Enter` auto-paste work identically in both tabs.
+- **Atomic Persistence (`pinned.toml`)**: Pinned templates (including cached PNG images) are saved atomically with `0600` owner-only permissions to `~/.config/clipon/pinned.toml` and automatically restored on daemon startup.
+- **Desktop Application Launcher Integration**: Added freedesktop `.desktop` entry and scalable SVG / 48x48 PNG icons (`assets/`).
+
 #### v1.1.2 — Popup Window Upward Drift Fix
 - **Fixed Popup Window Drifting Upward on Each Open**: Under X11 / XWayland (such as GNOME Mutter), `winit`'s `outer_rect` subtracts cached `_NET_FRAME_EXTENTS` (decorated title-bar height, ~37 px) from `XTranslateCoordinates` even on frameless (`Decorations(false)`) popup windows, whereas `OuterPosition` (`XConfigureWindow`) positions the client area directly. Reading `outer_rect` on close created a negative feedback loop (`y' = y - 37`) that shifted the popup upward on every invocation until it hit the top bar. ClipOn now tracks `inner_rect` (true client root coordinates), enforces a top-panel safety margin (`32 px`), and supports dragging the popup directly via its footer hint bar.
 
@@ -137,18 +144,21 @@ Windowsの名作『Clibor』のような直感的な動線をLinuxネイティ�
 1. **任意キーの連続叩き（ダブルタップ）で0.001秒ポップアップ**:
    - デフォルトは `Shift` 2回押し（設定画面で「キーを押して設定」により任意のキー・タップ回数・間隔に変更可能）。
    - 通常タイピング中（例：`Shift` を押しながら大文字を入力したとき等）は他キー混入を検知してカウントをリセットするため、**誤爆ゼロ**で動作します。
-2. **直感的なキー選択 ＆ 自動貼り付け**:
-   - `↑` / `↓` キー ＋ `Enter`、または各行の **`1`〜`9` / `a`〜`z` の単打** で即確定。
-   - 確定と同時にクリップボードへセットし、`/dev/uinput` 仮想キーボード（`xdotool` フォールバック付き）で直前のウィンドウへ `Ctrl+v`（変更可能）を自動送出します。
-3. **テキスト・ファイル・画像（サムネイル付き）対応**:
+2. **直感的なキー選択 ＆ `←` `→` タブ切り替え**:
+   - `↑` / `↓` キー ＋ `Enter`、または各行の **`1`〜`9` / `a`〜`z` の単打** で即確定し、`/dev/uinput` 仮想キーボードで直前のウィンドウへ `Ctrl+v`（変更可能）を自動送出します。
+   - **`→` キーで「📌 定型句」タブへ移動、`←` キーで「📋 履歴」タブへ瞬時に切り替え**られます。
+3. **📌 ピン留め定型句（永続化機能）**:
+   - 履歴行の **`📌` マーク**をクリックすると、そのアイテム（テキスト・ファイル・画像すべて対応）を「定型句」として固定できます。
+   - 固定された定型句は通常履歴の件数上限で押し流されず、`~/.config/clipon/pinned.toml`（権限 `0600`）へ自動保存されるためPC再起動後も維持されます。
+4. **テキスト・ファイル・画像（サムネイル付き）対応**:
    - **ファイル (`📄 filename`)**: 絶対パス文字列（`path`）またはファイル実体URI（`file`）として転送可能。
    - **画像 (`🖼️ [画像 WxH]`)**: ポップアップ内に縮小サムネイルを表示。画像データ貼り付け（`image`）または一時保存したPNGパス文字列（`path`）を切り替え可能。
-4. **ポップアップ表示位置の自動記憶**:
+5. **ポップアップ表示位置の自動記憶**:
    - フッターガイド部分のドラッグまたは `Super + マウス左ドラッグ` で履歴窓を見やすい場所へ移動して閉じると、その座標を `config.toml` に自動保存し、次回（PC再起動後も含む）から同じ場所に出現します。
-5. **システムトレイ常駐 ＆ OSログイン時自動起動**:
+6. **システムトレイ常駐・デスクトップランチャー登録・OS自動起動**:
    - Ubuntu トップバー（AppIndicator / StatusNotifierItem）にアイコンが常駐し、右クリックから **「表示」「設定」「終了」** を選択可能。
    - 設定画面のチェックボックス1つで `~/.config/autostart/clipon.desktop` を自動生成・削除します。
-6. **日本語 / 英語 UI リアルタイム切り替え**:
+7. **日本語 / 英語 UI リアルタイム切り替え**:
    - 設定画面右上の `🌐 日本語 / English` ラジオボタンから、表示言語を即座に切り替えられます。
 
 ---
@@ -160,8 +170,8 @@ Windowsの名作『Clibor』のような直感的な動線をLinuxネイティ�
 | `DISPLAY` | **必須** | X11 / XWayland 接続先（例: `:0`）。`x11rb`（XFixes イベント駆動クリップボード監視）およびウィンドウ座標制御に使用します。 |
 | `XDG_RUNTIME_DIR` | 推奨 | 多重起動防止・CLI通信用のUNIXドメインソケット（`$XDG_RUNTIME_DIR/clipon.sock`）配置先。未設定時は `/tmp/clipon-<uid>.sock` を使用します。 |
 | `DBUS_SESSION_BUS_ADDRESS` | 推奨 | トップバーへのトレイアイコン登録（`org.kde.StatusNotifierItem`）に使用します。未接続環境でも警告のみで本体機能は動作します。 |
-| `XDG_CONFIG_HOME` | 任意 | 設定保存先基底（既定: `~/.config` → `~/.config/clipon/config.toml`）。 |
-| `XDG_CACHE_HOME` | 任意 | 画像パスモード用の一時PNG保存先（既定: `~/.cache/clipon`）。 |
+| `XDG_CONFIG_HOME` | 任意 | 設定保存先基底（既定: `~/.config` → `~/.config/clipon/config.toml`, `pinned.toml`）。 |
+| `XDG_CACHE_HOME` | 任意 | 画像パスモードおよび定型句画像用の一時PNG保存先（既定: `~/.cache/clipon`）。 |
 | `HOME` | 必須 | `XDG_*` 未設定時の基底パスおよび日本語フォント探索（`~/.local/share/fonts`）に使用します。 |
 | `/dev/input/event*` | 推奨 | Wayland全画面での `Shift`×2 検知（`evdev`）に使用します。設定画面の「🔑 全画面キー監視を有効化」ボタンからワンクリックで権限設定（`uaccess` udevルール）が可能です。 |
 | `/dev/uinput` | 推奨 | カーネル仮想キーボードによる自動ペースト送出に使用します（Ubuntuデスクトップ環境では標準ACLでアクセス可能、不可時は `xdotool` へ自動フォールバック）。 |
@@ -198,6 +208,12 @@ language = "ja"     # UI表示言語: "ja" (日本語) | "en" (English)
 ---
 
 ### 更新履歴 (Changelog)
+
+#### v1.2.0 — 📌 ピン留め定型句タブ ＆ `←` `→` キータブ切り替え機能
+- **📌 クリックによる定型句固定・解除**: 履歴画面の各行左端に `📌` ボタンを追加。クリックするとそのコピー（テキスト・ファイル・画像）が定型句として固定され（固定中は黄色に点灯）、再クリックで解除できます。
+- **`←` / `→` キーによる「📋 履歴」⇔「📌 定型句」タブ切り替え**: ポップアップ表示中に `→` キーで「📌 定型句」タブへ移動し、`←` キーで「📋 履歴」タブへ戻れる直感的なキーボードナビゲーションを実装（タブのマウスクリックでも切替可能）。定型句タブでも `↑` `↓` + `Enter` や `1`〜`9`, `a`〜`z` 単打による即時自動貼り付けが可能です。
+- **定型句の自動永続化 (`pinned.toml`)**: 固定した定型句は `~/.config/clipon/pinned.toml`（所有者限定権限 `0600`）へ原子的に保存され、ClipOn や OS を再起動しても消えずに保持されます。
+- **デスクトップアプリランチャー連携**: Ubuntu / GNOME アプリケーションランチャー用の `.desktop` ファイルおよび SVG / PNG アイコンを `assets/` に同梱。
 
 #### v1.1.2 — ポップアップ表示位置の上方ドリフト修正
 - **履歴ウィンドウを開くたびに表示位置が画面上部へずれていく不具合を修正**: X11 / XWayland（GNOME Mutter 等）環境において、フレームレス（`Decorations(false)`）ウィンドウであっても `winit` の `outer_rect` がキャッシュ済みの `_NET_FRAME_EXTENTS`（タイトルバー高さ約 37px）を減算して返す一方、`OuterPosition`（`XConfigureWindow`）はクライアント座標へ直接配置するため、開閉のたびに Y 座標が約 37px ずつ上方へせり上がる負のフィードバックループが発生していました。座標の追跡・永続化に実クライアント座標（`inner_rect`）を使用するよう修正し、上端パネル安全マージン（`32 px`）の適用およびフッターガイドのドラッグ移動対応を追加しました。

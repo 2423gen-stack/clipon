@@ -4,6 +4,8 @@ use std::ffi::OsString;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use crate::config::UiLanguage;
 
 /// FNV-1a 64-bit の初期オフセット基底。
@@ -114,10 +116,35 @@ impl ClipItem {
     }
 }
 
-/// クリップボード履歴を先頭最新で保持するリングバッファ。
+/// `pinned.toml` 永続化用のシリアライズ構造体。
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct PinnedFileFormat {
+    #[serde(default)]
+    items: Vec<PinnedRecord>,
+}
+
+/// `pinned.toml` 内の単一定型句レコード。
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+enum PinnedRecord {
+    Text {
+        text: String,
+    },
+    Files {
+        uri_list: String,
+    },
+    Image {
+        hash_hex: String,
+        width: u32,
+        height: u32,
+    },
+}
+
+/// クリップボード履歴（リングバッファ）およびピン留め定型句リストを保持するストア。
 #[derive(Debug, Clone)]
 pub struct HistoryStore {
     items: Vec<ClipItem>,
+    pinned_items: Vec<ClipItem>,
     max_items: usize,
     next_id: u64,
 }
@@ -127,6 +154,7 @@ impl HistoryStore {
     pub fn new(max_items: usize) -> Self {
         Self {
             items: Vec::with_capacity(max_items.min(64)),
+            pinned_items: Vec::new(),
             max_items,
             next_id: 1,
         }
@@ -155,9 +183,189 @@ impl HistoryStore {
         true
     }
 
-    /// 先頭（最新）から末尾（最古）の順で履歴スライスを返す。
+    /// 先頭（最新）から末尾（最古）の順で通常履歴スライスを返す。
     pub fn items(&self) -> &[ClipItem] {
         &self.items
+    }
+
+    /// ピン留めされた定型句スライスを返す。
+    pub fn pinned_items(&self) -> &[ClipItem] {
+        &self.pinned_items
+    }
+
+    /// 指定ハッシュのアイテムが既に定型句としてピン留めされているか返す。
+    pub fn is_pinned_hash(&self, hash: u64) -> bool {
+        self.pinned_items.iter().any(|item| item.hash == hash)
+    }
+
+    /// 指定アイテムを定型句へ追加する（既に同一ハッシュが存在する場合は追加せず `false` を返す）。
+    pub fn pin_content(&mut self, content: ClipContent) -> bool {
+        if is_empty_content(&content) {
+            return false;
+        }
+        let hash = ClipItem::content_hash(&content);
+        if self
+            .pinned_items
+            .iter()
+            .any(|item| item.hash == hash && item.content == content)
+        {
+            return false;
+        }
+        let id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        self.pinned_items.push(ClipItem { id, hash, content });
+        true
+    }
+
+    /// 指定ハッシュのアイテムを定型句から解除（削除）する。削除された場合は `true` を返す。
+    pub fn unpin_by_hash(&mut self, hash: u64) -> bool {
+        let before = self.pinned_items.len();
+        self.pinned_items.retain(|item| item.hash != hash);
+        self.pinned_items.len() != before
+    }
+
+    /// 指定アイテムのピン留め状態をトグルする。ピン留めされた場合は `true`、解除された場合は `false` を返す。
+    pub fn toggle_pin(&mut self, content: ClipContent) -> bool {
+        let hash = ClipItem::content_hash(&content);
+        if self.unpin_by_hash(hash) {
+            false
+        } else {
+            self.pin_content(content)
+        }
+    }
+
+    /// 定型句リストを `pinned.toml`（画像は `cache_dir` 内の PNG）へ原子的に保存する。
+    pub fn save_pinned_to_path(&self, path: &Path, cache_dir: &Path) -> Result<(), String> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut records = Vec::with_capacity(self.pinned_items.len());
+        for item in &self.pinned_items {
+            match &item.content {
+                ClipContent::Text(text) => {
+                    records.push(PinnedRecord::Text { text: text.clone() });
+                }
+                ClipContent::FilePaths(paths) => {
+                    records.push(PinnedRecord::Files {
+                        uri_list: encode_uri_list(paths),
+                    });
+                }
+                ClipContent::Image {
+                    png_bytes,
+                    width,
+                    height,
+                } => {
+                    let _ = ensure_cached_image_path(cache_dir, item.hash, png_bytes)?;
+                    records.push(PinnedRecord::Image {
+                        hash_hex: format!("{:016x}", item.hash),
+                        width: *width,
+                        height: *height,
+                    });
+                }
+            }
+        }
+
+        let payload = PinnedFileFormat { items: records };
+        let serialized = toml::to_string_pretty(&payload)
+            .map_err(|err| format!("定型句データの TOML シリアライズに失敗しました: {err}"))?;
+
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent).map_err(|err| {
+            format!(
+                "定型句保存ディレクトリの作成に失敗しました ({}): {err}",
+                parent.display()
+            )
+        })?;
+
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("pinned.toml");
+        let tmp_path = parent.join(format!(".{file_name}.tmp.{}", std::process::id()));
+        std::fs::write(&tmp_path, serialized.as_bytes()).map_err(|err| {
+            format!(
+                "定型句一時ファイルの書き込みに失敗しました ({}): {err}",
+                tmp_path.display()
+            )
+        })?;
+
+        if let Err(err) =
+            std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))
+        {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(format!(
+                "定型句一時ファイルの権限設定 (0600) に失敗しました ({}): {err}",
+                tmp_path.display()
+            ));
+        }
+
+        if let Err(err) = std::fs::rename(&tmp_path, path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(format!(
+                "定型句ファイルの原子的保存に失敗しました ({}): {err}",
+                path.display()
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// `pinned.toml`（および画像キャッシュ）から定型句リストを読み込んで復元する。
+    pub fn load_pinned_from_path(&mut self, path: &Path, cache_dir: &Path) -> Result<(), String> {
+        let raw = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => {
+                return Err(format!(
+                    "定型句ファイルの読み込みに失敗しました ({}): {err}",
+                    path.display()
+                ));
+            }
+        };
+
+        let parsed: PinnedFileFormat = toml::from_str(&raw).map_err(|err| {
+            format!(
+                "定型句ファイル (TOML) の解析に失敗しました ({}): {err}",
+                path.display()
+            )
+        })?;
+
+        self.pinned_items.clear();
+        for rec in parsed.items {
+            match rec {
+                PinnedRecord::Text { text } => {
+                    self.pin_content(ClipContent::Text(text));
+                }
+                PinnedRecord::Files { uri_list } => {
+                    let paths = parse_uri_list(&uri_list);
+                    if !paths.is_empty() {
+                        self.pin_content(ClipContent::FilePaths(paths));
+                    }
+                }
+                PinnedRecord::Image {
+                    hash_hex,
+                    width,
+                    height,
+                } => {
+                    let Ok(hash) = u64::from_str_radix(hash_hex.trim(), 16) else {
+                        continue;
+                    };
+                    let img_path = cache_dir.join(format!("clipon_img_{hash:016x}.png"));
+                    if let Ok(png_bytes) = std::fs::read(&img_path) {
+                        if !png_bytes.is_empty() {
+                            self.pin_content(ClipContent::Image {
+                                png_bytes,
+                                width,
+                                height,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// 現在の履歴件数を返す。
@@ -607,5 +815,66 @@ mod tests {
             file_mode, 0o600,
             "画像キャッシュファイルは所有者限定の 0600 であるべき (actual: {file_mode:04o})"
         );
+    }
+
+    #[test]
+    fn pinned_items_toggle_and_roundtrip_persistence() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().expect("TempDir作成");
+        let pinned_path = dir.path().join("clipon").join("pinned.toml");
+        let cache_dir = dir.path().join("cache");
+
+        let mut store = HistoryStore::new(5);
+        let text_content = ClipContent::Text("定型句テスト\nよろしく".to_string());
+        let file_content =
+            ClipContent::FilePaths(vec![PathBuf::from("/home/gen/Projects/ClipOn/README.md")]);
+        let img_content = ClipContent::Image {
+            png_bytes: b"\x89PNG\r\n\x1a\npinned_img".to_vec(),
+            width: 320,
+            height: 240,
+        };
+
+        let text_hash = ClipItem::content_hash(&text_content);
+        assert!(!store.is_pinned_hash(text_hash));
+
+        // 1回目の toggle_pin でピン留め追加される
+        assert!(store.toggle_pin(text_content.clone()));
+        assert!(store.is_pinned_hash(text_hash));
+        assert_eq!(store.pinned_items().len(), 1);
+
+        // ファイル・画像もピン留め追加する
+        assert!(store.pin_content(file_content.clone()));
+        assert!(store.pin_content(img_content.clone()));
+        assert_eq!(store.pinned_items().len(), 3);
+
+        // 同一コンテンツの重複 pin_content は false を返し重複追加しない
+        assert!(!store.pin_content(text_content.clone()));
+        assert_eq!(store.pinned_items().len(), 3);
+
+        // pinned.toml へ保存してパーミッション (0600) と復元を検証する
+        store
+            .save_pinned_to_path(&pinned_path, &cache_dir)
+            .expect("定型句の保存成功");
+        let mode = std::fs::metadata(&pinned_path)
+            .expect("pinned.toml メタデータ")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+
+        let mut loaded_store = HistoryStore::new(5);
+        loaded_store
+            .load_pinned_from_path(&pinned_path, &cache_dir)
+            .expect("定型句の読込成功");
+        assert_eq!(loaded_store.pinned_items().len(), 3);
+        assert_eq!(loaded_store.pinned_items()[0].content, text_content);
+        assert_eq!(loaded_store.pinned_items()[1].content, file_content);
+        assert_eq!(loaded_store.pinned_items()[2].content, img_content);
+
+        // 2回目の toggle_pin でピン留め解除される
+        assert!(!loaded_store.toggle_pin(text_content));
+        assert!(!loaded_store.is_pinned_hash(text_hash));
+        assert_eq!(loaded_store.pinned_items().len(), 2);
     }
 }
