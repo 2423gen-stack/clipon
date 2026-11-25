@@ -32,7 +32,7 @@
    - **Text**: Single-line preview with newline markers (`↵`).
    - **Files (`📄 filename`)**: Paste either the absolute file path string (`path` mode) or file URI object (`file` mode).
    - **Images (`🖼️ [Image WxH]`)**: Live thumbnail preview; paste raw PNG image data (`image` mode) or a cached local PNG file path (`path` mode).
-5. **Remembers Popup Position**: Move the popup anywhere with `Super + Left Mouse Drag`; ClipOn automatically remembers and persists the position to `config.toml` when closed.
+5. **Remembers Popup Position**: Move the popup anywhere by dragging the bottom hint bar or using `Super + Left Mouse Drag`; ClipOn automatically remembers and persists the exact client position to `config.toml` when closed.
 6. **System Tray & Autostart**: Top-bar `StatusNotifierItem` (AppIndicator) tray icon with **Show / Settings / Quit**, plus a 1-click checkbox for Ubuntu login autostart (`~/.config/autostart/clipon.desktop`).
 7. **Bilingual GUI (`日本語` / `English`)**: Switch the UI language live from the Settings window (`🌐 日本語 / English`).
 
@@ -108,6 +108,9 @@ clipon --help       Print CLI help
 
 ### Changelog
 
+#### v1.1.2 — Popup Window Upward Drift Fix
+- **Fixed Popup Window Drifting Upward on Each Open**: Under X11 / XWayland (such as GNOME Mutter), `winit`'s `outer_rect` subtracts cached `_NET_FRAME_EXTENTS` (decorated title-bar height, ~37 px) from `XTranslateCoordinates` even on frameless (`Decorations(false)`) popup windows, whereas `OuterPosition` (`XConfigureWindow`) positions the client area directly. Reading `outer_rect` on close created a negative feedback loop (`y' = y - 37`) that shifted the popup upward on every invocation until it hit the top bar. ClipOn now tracks `inner_rect` (true client root coordinates), enforces a top-panel safety margin (`32 px`), and supports dragging the popup directly via its footer hint bar.
+
 #### v1.1.1 — XKB `ctrl:swapcaps` & Custom Modifier Map Fix
 - **Fixed CapsLock Toggling ON & Raw `'v'` Input on Auto-Paste**: On systems with XKB modifier remapping (such as `ctrl:swapcaps` or `ctrl:nocaps`, where physical `KEY_LEFTCTRL` is mapped to `Caps_Lock`), emitting `KEY_LEFTCTRL` via `/dev/uinput` previously caused the compositor to toggle CapsLock ON and type an unmodified `'v'`. `AutoPaster` and `KeyHook` now dynamically query the X11/XWayland modifier map (`GetModifierMapping`) via `ActiveModifierMap` and resolve `Ctrl` to a non-Lock physical keycode (preferring `KEY_RIGHTCTRL` or `KEY_CAPSLOCK`), with stabilized inter-event settle timing (`8 ms`).
 
@@ -141,7 +144,7 @@ Windowsの名作『Clibor』のような直感的な動線をLinuxネイティ�
    - **ファイル (`📄 filename`)**: 絶対パス文字列（`path`）またはファイル実体URI（`file`）として転送可能。
    - **画像 (`🖼️ [画像 WxH]`)**: ポップアップ内に縮小サムネイルを表示。画像データ貼り付け（`image`）または一時保存したPNGパス文字列（`path`）を切り替え可能。
 4. **ポップアップ表示位置の自動記憶**:
-   - `Super + マウス左ドラッグ` で履歴窓を見やすい場所へ移動して閉じると、その座標を `config.toml` に自動保存し、次回（PC再起動後も含む）から同じ場所に出現します。
+   - フッターガイド部分のドラッグまたは `Super + マウス左ドラッグ` で履歴窓を見やすい場所へ移動して閉じると、その座標を `config.toml` に自動保存し、次回（PC再起動後も含む）から同じ場所に出現します。
 5. **システムトレイ常駐 ＆ OSログイン時自動起動**:
    - Ubuntu トップバー（AppIndicator / StatusNotifierItem）にアイコンが常駐し、右クリックから **「表示」「設定」「終了」** を選択可能。
    - 設定画面のチェックボックス1つで `~/.config/autostart/clipon.desktop` を自動生成・削除します。
@@ -195,6 +198,9 @@ language = "ja"     # UI表示言語: "ja" (日本語) | "en" (English)
 ---
 
 ### 更新履歴 (Changelog)
+
+#### v1.1.2 — ポップアップ表示位置の上方ドリフト修正
+- **履歴ウィンドウを開くたびに表示位置が画面上部へずれていく不具合を修正**: X11 / XWayland（GNOME Mutter 等）環境において、フレームレス（`Decorations(false)`）ウィンドウであっても `winit` の `outer_rect` がキャッシュ済みの `_NET_FRAME_EXTENTS`（タイトルバー高さ約 37px）を減算して返す一方、`OuterPosition`（`XConfigureWindow`）はクライアント座標へ直接配置するため、開閉のたびに Y 座標が約 37px ずつ上方へせり上がる負のフィードバックループが発生していました。座標の追跡・永続化に実クライアント座標（`inner_rect`）を使用するよう修正し、上端パネル安全マージン（`32 px`）の適用およびフッターガイドのドラッグ移動対応を追加しました。
 
 #### v1.1.1 — XKB `ctrl:swapcaps`（Ctrl / CapsLock 入れ替え環境）対応修正
 - **自動ペースト時に CapsLock が ON になり生文字 `'v'` が入力される不具合を修正**: OS側で `ctrl:swapcaps` 等の XKB キーマップオプションが有効な環境では、物理スキャンコード `KEY_LEFTCTRL` (evdev 29) が OS のコンポジタによって `Caps_Lock` に変換されるため、`/dev/uinput` からの自動ペースト時に CapsLock が点灯し、修飾なしの `'v'` が打たれる問題がありました。`ActiveModifierMap` により X11/XWayland の実モディファイアマッピング (`GetModifierMapping`) を動的照会し、`Caps_Lock` (`Lock` 修飾) に割り当てられていない有効な物理キー（`KEY_RIGHTCTRL` または `KEY_CAPSLOCK`）へ自動解決するよう修正しました（併せて修飾キー押下〜主キー押下間の同期ディレイを `8 ms` へ最適化）。

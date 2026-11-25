@@ -131,6 +131,9 @@ pub fn spawn_paste_worker() -> (Sender<Option<String>>, std::thread::JoinHandle<
     (tx, handle)
 }
 
+/// ウィンドウマネージャ（GNOME 等）の上部パネルと重ならないようにする既定の上端安全マージン（論理ピクセル）。
+const POPUP_MIN_TOP_MARGIN: f32 = 32.0;
+
 /// マウスカーソル座標を基準としつつ、画面領域 `[0, screen - win]` 内にポップアップ位置をクランプする。
 pub fn clamp_popup_position(
     anchor: (i32, i32),
@@ -139,8 +142,9 @@ pub fn clamp_popup_position(
 ) -> (f32, f32) {
     let max_x = (screen_size.0 - win_size.0).max(0.0);
     let max_y = (screen_size.1 - win_size.1).max(0.0);
+    let min_y = POPUP_MIN_TOP_MARGIN.min(max_y);
     let x = (anchor.0 as f32 + 8.0).clamp(0.0, max_x);
-    let y = (anchor.1 as f32 + 8.0).clamp(0.0, max_y);
+    let y = (anchor.1 as f32 + 8.0).clamp(min_y, max_y);
     (x, y)
 }
 
@@ -153,9 +157,13 @@ pub fn resolve_popup_position(
 ) -> (f32, f32) {
     let max_x = (screen_size.0 - win_size.0).max(0.0);
     let max_y = (screen_size.1 - win_size.1).max(0.0);
+    let min_y = POPUP_MIN_TOP_MARGIN.min(max_y);
 
     if let Some((sx, sy)) = saved_pos {
-        return ((sx as f32).clamp(0.0, max_x), (sy as f32).clamp(0.0, max_y));
+        return (
+            (sx as f32).clamp(0.0, max_x),
+            (sy as f32).clamp(min_y, max_y),
+        );
     }
 
     if let Some((ax, ay)) = fallback_anchor {
@@ -165,7 +173,7 @@ pub fn resolve_popup_position(
         }
     }
 
-    (max_x * 0.5, max_y * 0.5)
+    (max_x * 0.5, (max_y * 0.5).max(min_y))
 }
 
 /// リスト選択インデックスを前後へ移動し、先頭・末尾でラップする。空リストでは `0` を返す。
@@ -561,8 +569,12 @@ impl ClipOnApp {
     /// 現在のポップアップ表示位置を読み取り、前回保存値と異なっていれば `config.toml` へ永続化する。
     fn persist_popup_position(&mut self, ctx: &egui::Context) {
         if self.pending_popup_pos.is_none() {
-            if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
-                self.last_popup_pos = Some((rect.min.x.round() as i32, rect.min.y.round() as i32));
+            // フレームレス (`Decorations(false)`) ウィンドウでは、winit X11 の `outer_rect` が
+            // `_NET_FRAME_EXTENTS`（装飾時のタイトルバー高さ ~37px）を減算して返し、開閉ごとに
+            // 画面上部へせり上がるドリフトを引き起こす。そのため実クライアント座標 (`inner_rect`) を用いる。
+            if let Some(rect) = ctx.input(|i| i.viewport().inner_rect) {
+                self.last_popup_pos =
+                    Some((rect.min.x.round() as i32, rect.min.y.round() as i32));
             }
         }
         let Some((x, y)) = self.last_popup_pos else {
@@ -648,6 +660,7 @@ impl ClipOnApp {
             )
         });
         let clamped_pos = resolve_popup_position(saved_pos, logical_anchor, win_size, screen_size);
+        self.last_popup_pos = Some((clamped_pos.0.round() as i32, clamped_pos.1.round() as i32));
         self.pending_popup_pos = Some(clamped_pos);
 
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
@@ -887,7 +900,9 @@ impl ClipOnApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
                 pos.0, pos.1,
             )));
-        } else if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
+        } else if let Some(rect) = ctx.input(|i| i.viewport().inner_rect) {
+            // outer_rect ではなく inner_rect を参照することで、winit X11 の _NET_FRAME_EXTENTS
+            // 減算による上方ドリフトを完全に防止しつつ、Super+ドラッグ等による移動も正確に追従する。
             self.last_popup_pos = Some((rect.min.x.round() as i32, rect.min.y.round() as i32));
         }
 
@@ -908,6 +923,7 @@ impl ClipOnApp {
         let mut clicked_index: Option<usize> = None;
         let mut open_settings_clicked = false;
         let mut close_clicked = false;
+        let mut start_window_drag = false;
         let items = self.cached_items.clone();
         let selected_index = self.selected_index;
         let scroll_to_selection = self.scroll_to_selection;
@@ -1011,15 +1027,21 @@ impl ClipOnApp {
 
                 ui.separator();
                 ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(tr(
-                            lang,
-                            "↑↓+Enter / 1-9,a-z で貼付",
-                            "↑↓+Enter / 1-9,a-z to paste",
-                        ))
-                        .small()
-                        .color(ui.visuals().weak_text_color()),
+                    let hint_resp = ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(tr(
+                                lang,
+                                "↑↓+Enter / 1-9,a-z で貼付",
+                                "↑↓+Enter / 1-9,a-z to paste",
+                            ))
+                            .small()
+                            .color(ui.visuals().weak_text_color()),
+                        )
+                        .sense(egui::Sense::drag()),
                     );
+                    if hint_resp.drag_started_by(egui::PointerButton::Primary) {
+                        start_window_drag = true;
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .small_button(tr(lang, "✕ 閉じる", "✕ Close"))
@@ -1036,6 +1058,10 @@ impl ClipOnApp {
                     });
                 });
             });
+
+        if start_window_drag {
+            ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
 
         if close_clicked {
             self.hide_window(ctx);
@@ -1601,8 +1627,12 @@ mod tests {
             (1500.0, 720.0)
         );
 
-        // 負座標や画面より大きいウィンドウでも安全に 0 へ収まる
-        assert_eq!(clamp_popup_position((-50, -10), win, screen), (0.0, 0.0));
+        // 負座標や上端パネル領域は上端マージン (POPUP_MIN_TOP_MARGIN) にクランプされ、
+        // 画面より大きいウィンドウでは安全に (0, 0) へ収まる
+        assert_eq!(
+            clamp_popup_position((-50, -10), win, screen),
+            (0.0, POPUP_MIN_TOP_MARGIN)
+        );
         assert_eq!(
             clamp_popup_position((100, 100), (500.0, 400.0), (320.0, 240.0)),
             (0.0, 0.0)
@@ -1684,6 +1714,20 @@ mod tests {
             resolve_popup_position(Some((1800, 950)), None, win, screen),
             (1500.0, 780.0)
         );
+
+        // 過去に負の Y 座標や上端パネル領域（< POPUP_MIN_TOP_MARGIN）が保存されていた場合でも安全マージンへ補正する
+        assert_eq!(
+            resolve_popup_position(Some((1478, -5)), None, win, screen),
+            (1478.0, POPUP_MIN_TOP_MARGIN)
+        );
+
+        // 連続して開閉を繰り返しても保存座標が一切ドリフトしないこと（不動点条件）
+        let mut pos = (1478, 520);
+        for _ in 0..20 {
+            let (rx, ry) = resolve_popup_position(Some(pos), Some((300, 300)), win, screen);
+            pos = (rx.round() as i32, ry.round() as i32);
+        }
+        assert_eq!(pos, (1478, 520));
 
         // 未保存かつ XQueryPointer が (0, 0) の場合は左上張り付きではなく画面中央にする
         assert_eq!(
