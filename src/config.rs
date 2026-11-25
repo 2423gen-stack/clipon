@@ -277,6 +277,7 @@ pub fn render_desktop_entry(exec_path: &Path) -> String {
          Name=ClipOn\n\
          Comment=超軽量クリップボードランチャー\n\
          Exec={quoted_exec}\n\
+         Icon=/home/gen/.local/share/icons/clipon.png\n\
          Terminal=false\n\
          Categories=Utility;\n\
          X-GNOME-Autostart-enabled=true\n"

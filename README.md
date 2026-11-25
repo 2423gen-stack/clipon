@@ -110,10 +110,10 @@ clipon --help       Print CLI help
 ### Changelog
 
 #### v1.2.0 — 📌 Pinned Templates Tab & `←` / `→` Arrow Tab Switching
-- **📌 Pin Any History Item as a Template**: Added a `📌` button to each row in the popup. Clicking `📌` pins (or unpins) the item into the **📌 Pinned (定型句)** tab so frequently used snippets, paths, or images are permanently protected from rolling out of the history buffer.
+- **📌 Pin Any History Item as a Template**: Added a high-contrast `📌` toggle button to each row. Clicking `📌` pins (or unpins) the item into the **📌 Pinned (定型句)** tab so frequently used snippets, paths, or images are permanently protected from rolling out of the history buffer. Fixed button hit-testing separation from row selection so pinning is instant and reliable.
 - **Instant `←` / `→` Keyboard Tab Navigation**: Press `→` in the popup to switch to the **📌 Pinned** tab, and press `←` to return to **📋 History** (or click the tab headers directly). All single-key shortcuts (`1`–`9`, `a`–`z`) and `↑` / `↓` + `Enter` auto-paste work identically in both tabs.
 - **Atomic Persistence (`pinned.toml`)**: Pinned templates (including cached PNG images) are saved atomically with `0600` owner-only permissions to `~/.config/clipon/pinned.toml` and automatically restored on daemon startup.
-- **Desktop Application Launcher Integration**: Added freedesktop `.desktop` entry and scalable SVG / 48x48 PNG icons (`assets/`).
+- **Desktop Application Launcher Integration**: Added freedesktop `.desktop` entry and multi-resolution PNG / scalable SVG icons (`assets/`), with absolute icon path resolution ensuring launcher icons render reliably on Ubuntu GNOME.
 
 #### v1.1.2 — Popup Window Upward Drift Fix
 - **Fixed Popup Window Drifting Upward on Each Open**: Under X11 / XWayland (such as GNOME Mutter), `winit`'s `outer_rect` subtracts cached `_NET_FRAME_EXTENTS` (decorated title-bar height, ~37 px) from `XTranslateCoordinates` even on frameless (`Decorations(false)`) popup windows, whereas `OuterPosition` (`XConfigureWindow`) positions the client area directly. Reading `outer_rect` on close created a negative feedback loop (`y' = y - 37`) that shifted the popup upward on every invocation until it hit the top bar. ClipOn now tracks `inner_rect` (true client root coordinates), enforces a top-panel safety margin (`32 px`), and supports dragging the popup directly via its footer hint bar.
@@ -210,10 +210,10 @@ language = "ja"     # UI表示言語: "ja" (日本語) | "en" (English)
 ### 更新履歴 (Changelog)
 
 #### v1.2.0 — 📌 ピン留め定型句タブ ＆ `←` `→` キータブ切り替え機能
-- **📌 クリックによる定型句固定・解除**: 履歴画面の各行左端に `📌` ボタンを追加。クリックするとそのコピー（テキスト・ファイル・画像）が定型句として固定され（固定中は黄色に点灯）、再クリックで解除できます。
+- **📌 クリックによる定型句固定・解除**: 履歴画面の各行左端に高コントラストな `📌` ボタンを追加。クリックするとそのコピー（テキスト・ファイル・画像）が定型句として固定され（固定中は黄色に点灯）、再クリックで解除できます。行選択のクリック判定エリアとピン留めボタンのヒットテストを分離し、誤タップなく快適・確実に固定化できるように最適化しました。
 - **`←` / `→` キーによる「📋 履歴」⇔「📌 定型句」タブ切り替え**: ポップアップ表示中に `→` キーで「📌 定型句」タブへ移動し、`←` キーで「📋 履歴」タブへ戻れる直感的なキーボードナビゲーションを実装（タブのマウスクリックでも切替可能）。定型句タブでも `↑` `↓` + `Enter` や `1`〜`9`, `a`〜`z` 単打による即時自動貼り付けが可能です。
 - **定型句の自動永続化 (`pinned.toml`)**: 固定した定型句は `~/.config/clipon/pinned.toml`（所有者限定権限 `0600`）へ原子的に保存され、ClipOn や OS を再起動しても消えずに保持されます。
-- **デスクトップアプリランチャー連携**: Ubuntu / GNOME アプリケーションランチャー用の `.desktop` ファイルおよび SVG / PNG アイコンを `assets/` に同梱。
+- **デスクトップアプリランチャー連携 ＆ アイコン表示**: Ubuntu / GNOME アプリケーションランチャー用の `.desktop` ファイルおよびマルチ解像度 PNG（16x16〜512x512）/ SVG アイコンを同梱。GNOME環境で確実にアイコンが表示されるよう、絶対パス参照とアイコン配置を整備しました。
 
 #### v1.1.2 — ポップアップ表示位置の上方ドリフト修正
 - **履歴ウィンドウを開くたびに表示位置が画面上部へずれていく不具合を修正**: X11 / XWayland（GNOME Mutter 等）環境において、フレームレス（`Decorations(false)`）ウィンドウであっても `winit` の `outer_rect` がキャッシュ済みの `_NET_FRAME_EXTENTS`（タイトルバー高さ約 37px）を減算して返す一方、`OuterPosition`（`XConfigureWindow`）はクライアント座標へ直接配置するため、開閉のたびに Y 座標が約 37px ずつ上方へせり上がる負のフィードバックループが発生していました。座標の追跡・永続化に実クライアント座標（`inner_rect`）を使用するよう修正し、上端パネル安全マージン（`32 px`）の適用およびフッターガイドのドラッグ移動対応を追加しました。
