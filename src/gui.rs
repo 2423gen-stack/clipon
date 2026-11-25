@@ -1092,6 +1092,9 @@ impl ClipOnApp {
                                     .unwrap_or_else(|| " · ".to_string());
 
                                 let mut row_pin_clicked = false;
+                                let mut row_item_clicked = false;
+                                let mut row_hovered = false;
+                                let mut pin_btn_rect = egui::Rect::NOTHING;
                                 let mut prepared = egui::Frame::NONE
                                     .corner_radius(4.0)
                                     .inner_margin(egui::Margin::symmetric(6, 4))
@@ -1100,80 +1103,149 @@ impl ClipOnApp {
                                     let row_ui = &mut prepared.content_ui;
                                     row_ui.set_min_width(row_ui.available_width());
                                     row_ui.horizontal(|ui| {
-                                        let pin_color = if is_pinned {
-                                            egui::Color32::from_rgb(250, 204, 21)
+                                        let (pin_fg, pin_bg, pin_stroke) = if is_pinned {
+                                            (
+                                                egui::Color32::from_rgb(250, 204, 21),
+                                                egui::Color32::from_rgba_unmultiplied(
+                                                    250, 204, 21, 36,
+                                                ),
+                                                egui::Stroke::new(
+                                                    1.0,
+                                                    egui::Color32::from_rgb(250, 204, 21),
+                                                ),
+                                            )
                                         } else {
-                                            ui.visuals()
-                                                .weak_text_color()
-                                                .gamma_multiply(0.45)
+                                            (
+                                                egui::Color32::from_rgb(203, 213, 225),
+                                                egui::Color32::from_rgba_unmultiplied(
+                                                    148, 163, 184, 24,
+                                                ),
+                                                egui::Stroke::new(
+                                                    1.0,
+                                                    egui::Color32::from_rgba_unmultiplied(
+                                                        148, 163, 184, 90,
+                                                    ),
+                                                ),
+                                            )
                                         };
                                         let pin_tooltip = if is_pinned {
                                             tr(lang, "定型句の固定を解除", "Unpin from templates")
                                         } else {
-                                            tr(lang, "定型句として固定 (→キーで表示)", "Pin as template (view with →)")
+                                            tr(
+                                                lang,
+                                                "定型句として固定 (→キーで表示)",
+                                                "Pin as template (view with →)",
+                                            )
                                         };
                                         let pin_btn = ui
                                             .add(
                                                 egui::Button::new(
                                                     egui::RichText::new("📌")
-                                                        .small()
-                                                        .color(pin_color),
+                                                        .size(13.0)
+                                                        .color(pin_fg),
                                                 )
-                                                .frame(false),
+                                                .fill(pin_bg)
+                                                .stroke(pin_stroke)
+                                                .corner_radius(4.0)
+                                                .min_size(egui::vec2(24.0, 22.0)),
                                             )
                                             .on_hover_text(pin_tooltip);
+                                        pin_btn_rect = pin_btn.rect;
                                         if pin_btn.clicked() {
                                             row_pin_clicked = true;
                                         }
+                                        if pin_btn.hovered() {
+                                            row_hovered = true;
+                                        }
 
-                                        ui.label(
-                                            egui::RichText::new(&badge)
-                                                .monospace()
-                                                .strong()
-                                                .color(if is_selected {
-                                                    ui.visuals().strong_text_color()
-                                                } else {
-                                                    ui.visuals().weak_text_color()
-                                                }),
+                                        let badge_resp = ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(&badge)
+                                                    .monospace()
+                                                    .strong()
+                                                    .color(if is_selected {
+                                                        ui.visuals().strong_text_color()
+                                                    } else {
+                                                        ui.visuals().weak_text_color()
+                                                    }),
+                                            )
+                                            .selectable(false)
+                                            .sense(egui::Sense::click()),
                                         );
+                                        if badge_resp.clicked() {
+                                            row_item_clicked = true;
+                                        }
+                                        if badge_resp.hovered() {
+                                            row_hovered = true;
+                                        }
 
                                         if let ClipContent::Image { png_bytes, .. } = &item.content
                                         {
                                             if let Some(tex) =
                                                 self.get_or_load_thumbnail(ctx, item.hash, png_bytes)
                                             {
-                                                ui.add(
+                                                let img_resp = ui.add(
                                                     egui::Image::from_texture(&tex)
                                                         .max_size(egui::vec2(36.0, 28.0))
-                                                        .corner_radius(2.0),
+                                                        .corner_radius(2.0)
+                                                        .sense(egui::Sense::click()),
                                                 );
+                                                if img_resp.clicked() {
+                                                    row_item_clicked = true;
+                                                }
+                                                if img_resp.hovered() {
+                                                    row_hovered = true;
+                                                }
                                             }
                                         }
 
-                                        let label_text = item.display_label_for_lang(46, lang);
-                                        ui.add(
+                                        let label_text = item.display_label_for_lang(44, lang);
+                                        let label_resp = ui.add(
                                             egui::Label::new(label_text)
                                                 .truncate()
-                                                .selectable(false),
+                                                .selectable(false)
+                                                .sense(egui::Sense::click()),
                                         );
+                                        if label_resp.clicked() {
+                                            row_item_clicked = true;
+                                        }
+                                        if label_resp.hovered() {
+                                            row_hovered = true;
+                                        }
                                     });
                                 }
 
-                                let row_resp =
-                                    prepared.allocate_space(ui).interact(egui::Sense::click());
+                                let row_space_resp = prepared.allocate_space(ui);
+                                let mut row_click_rect = row_space_resp.rect;
+                                if pin_btn_rect.width() > 0.0 {
+                                    row_click_rect.min.x =
+                                        (pin_btn_rect.max.x + 4.0).min(row_click_rect.max.x);
+                                }
+                                let row_bg_interact = ui.interact(
+                                    row_click_rect,
+                                    ui.id().with(("clipon_row_click", idx)),
+                                    egui::Sense::click(),
+                                );
+                                if row_bg_interact.clicked() {
+                                    row_item_clicked = true;
+                                }
+                                if row_bg_interact.hovered() {
+                                    row_hovered = true;
+                                }
+
                                 if is_selected {
                                     prepared.frame.fill = ui.visuals().selection.bg_fill;
-                                } else if row_resp.hovered() {
+                                } else if row_hovered {
                                     prepared.frame.fill = ui.visuals().widgets.hovered.bg_fill;
                                 }
                                 prepared.paint(ui);
 
                                 if is_selected && scroll_to_selection {
-                                    row_resp.scroll_to_me(Some(egui::Align::Center));
+                                    row_space_resp.scroll_to_me(Some(egui::Align::Center));
                                 }
                                 if row_pin_clicked {
                                     pin_toggled_item = Some(item.clone());
-                                } else if row_resp.clicked() {
+                                } else if row_item_clicked {
                                     clicked_index = Some(idx);
                                 }
                             }
