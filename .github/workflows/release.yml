@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-release:
+    name: Build and Release
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxfixes-dev libgl1-mesa-dev
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Package artifacts
+        run: |
+          RELEASE_TAG=${GITHUB_REF#refs/tags/}
+          ARCH="x86_64-unknown-linux-gnu"
+          PKG_NAME="clipon-${RELEASE_TAG}-${ARCH}"
+          mkdir -p "dist/${PKG_NAME}/assets"
+
+          # Copy files
+          cp target/release/clipon "dist/${PKG_NAME}/"
+          cp -r assets/* "dist/${PKG_NAME}/assets/"
+          cp README.md LICENSE "dist/${PKG_NAME}/"
+          cp install.sh "dist/${PKG_NAME}/" 2>/dev/null || true
+
+          # Create tar.gz
+          cd dist
+          tar -czf "${PKG_NAME}.tar.gz" "${PKG_NAME}"
+          sha256sum "${PKG_NAME}.tar.gz" > "${PKG_NAME}.tar.gz.sha256"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

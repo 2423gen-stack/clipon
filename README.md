@@ -75,7 +75,15 @@ ClipOn checks the following environment variables and system interfaces at runti
 
 ### Build & Quick Start
 
-#### 1. Build & Install
+#### 1. Instant One-Line Install (Recommended)
+
+Run this one-liner in your terminal to automatically download and install the latest binary, application launcher icons, and desktop entries to `~/.local/bin`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/2423gen-stack/clipon/main/install.sh | bash
+```
+
+*Or, if you prefer building from source with Cargo:*
 
 ```bash
 git clone https://github.com/2423gen-stack/clipon.git
@@ -160,6 +168,25 @@ Windowsの名作『Clibor』のような直感的な動線をLinuxネイティ�
    - 設定画面のチェックボックス1つで `~/.config/autostart/clipon.desktop` を自動生成・削除します。
 7. **日本語 / 英語 UI リアルタイム切り替え**:
    - 設定画面右上の `🌐 日本語 / English` ラジオボタンから、表示言語を即座に切り替えられます。
+
+---
+
+### クイックインストール・導入方法
+
+ターミナルで以下の **1行コマンド（ワンライナー）** を実行するだけで、最新のビルド済みバイナリ、デスクトップランチャー用アイコン、`.desktop` エントリが `~/.local/bin` へ自動配備されます：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/2423gen-stack/clipon/main/install.sh | bash
+```
+
+*※ソースコードから自分でビルドしたい場合:*
+```bash
+git clone https://github.com/2423gen-stack/clipon.git
+cd clipon
+cargo build --release
+mkdir -p ~/.local/bin
+cp -f target/release/clipon ~/.local/bin/clipon
+```
 
 ---
 
